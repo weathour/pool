@@ -1,0 +1,35 @@
+#!/bin/sh
+# 推送前：把同样的引用也镜像到 GitHub。
+#
+# ★ 这里用 pre-push 而不是 post-push —— git 没有 post-push 钩子
+#   （服务端是 post-receive，客户端只有 pre-push / pre-commit 等）。
+#   一开始写了个 post-push，结果它永远不会被调用。（真踩过）
+#
+# 钩子参数：<remote-name> <remote-url>
+# stdin：每行 "<local-ref> <local-sha> <remote-ref> <remote-sha>"
+set -u
+
+remote="${1:-}"
+url="${2:-}"
+CRED="$HOME/.pool/github-credentials"
+LOG="$HOME/.pool/github-mirror.log"
+
+# 只在推给 Gitea（origin）时镜像；推给 GitHub 的那次不再递归
+[ "$remote" = "origin" ] || exit 0
+case "$url" in *github.com*) exit 0 ;; esac
+
+# 把 stdin 读干净（git 要求钩子读完它）
+cat >/dev/null
+
+[ -f "$CRED" ] || { echo "  [mirror] 没有 $CRED，跳过" >&2; exit 0; }
+
+{
+    echo "--- $(date '+%F %T') 镜像到 GitHub ---"
+    GIT_TERMINAL_PROMPT=0 \
+    git -c "credential.helper=store --file=$CRED" \
+        push --quiet --prune github \
+        '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*' 2>&1
+    echo "--- 退出码 $? ---"
+} >> "$LOG" 2>&1
+
+exit 0
