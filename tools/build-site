@@ -106,7 +106,10 @@ def build_view(data: dict) -> dict:
     credits = data["credits"]
     balances: dict[str, float] = defaultdict(float)
     for c in credits:
-        if c.get("op") in ("mint", "decay", "adjust") and isinstance(c.get("amount"), (int, float)):
+        # ★ reuse 是【真 credit】，必须计入：mint 只发定基，产物被引用后
+        #   由 `sign reuse` 补发加成，两笔加在一起才是账。漏掉 reuse 会让
+        #   公开页显示的数比 tools/status 和账本本身都小（踩过：8.5 vs 9.4）。
+        if c.get("op") in ("mint", "reuse", "decay", "adjust") and isinstance(c.get("amount"), (int, float)):
             balances[h(c.get("member"))] += c["amount"]
 
     endorsements = [
@@ -204,6 +207,13 @@ PAGE = """<!DOCTYPE html>
 
 <h1>池子</h1>
 <p class="sub">一个公告板加一本账。把自己攒下的资料、经验、和处理资料的方法放进一个公共的地方，并且给「想一起做事的人」一个不用互相认识也能对接的入口。</p>
+
+<p class="sub" style="margin:-1rem 0 0">
+  这页是只读的橱窗（快照）。<b>要开单、提 PR、clone，去
+  <a href="https://git.weathour.xyz">git.weathour.xyz</a></b>；
+  公开只读镜像在
+  <a href="https://github.com/weathour/pool">GitHub</a>。
+</p>
 
 <div class="stats">
   <div class="stat"><b>{n_open}</b> 张单开着</div>
@@ -313,8 +323,10 @@ function field(k, v) {{
 
 
 def render(view: dict) -> str:
+    # ★ 先转义再拼 <br>：反过来会把 <br> 自己转义掉，页面上显示成
+    #   一行里的 "&lt;br&gt;"（踩过）。
     heads = "<br>".join(
-        f"{name}: {h}" if h else f"{name}: （空）"
+        html.escape(f"{name}: {h}" if h else f"{name}: （空）")
         for name, h in view["chain_heads"].items()
     )
     return PAGE.format(
@@ -323,7 +335,7 @@ def render(view: dict) -> str:
         n_accepted=view["counts"]["accepted"],
         n_reused=view["counts"]["reused"],
         n_members=len(view["members"]),
-        heads=html.escape(heads),
+        heads=heads,
         payload=json.dumps(view, ensure_ascii=False, sort_keys=True),
     )
 
