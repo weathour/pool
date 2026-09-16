@@ -5,10 +5,11 @@
 #   make meta      只校验仓库自身的元一致性
 #   make status    一眼看清现状
 #   make cycle     周期结算（只报告，不写）
+#   make home      刷新 Gitea 主页的数据
 #   make site      生成展示页到 site/
 #   make clean     清理构建产物
 
-.PHONY: check validate meta status cycle site clean
+.PHONY: check validate meta status cycle home site clean
 
 PY := python3
 
@@ -38,6 +39,9 @@ status:
 
 cycle:
 	@$(PY) tools/cycle
+
+home:
+	@$(PY) tools/gitea-home-data
 
 site:
 	@$(PY) tools/build-site

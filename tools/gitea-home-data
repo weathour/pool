@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""生成 Gitea 主页要用的数据。
+
+为什么用这个方式，而不是让 Gitea 模板直接读 data/：
+  Gitea 的模板引擎读不了 JSONL，而 custom/public 是【静态】目录，
+  放进去的 HTML 不走模板、拿不到登录状态。
+  所以：脚本生成 JSON → 主页用一小段 JS fetch 它 → 渲染出实时数字。
+
+★ 这是单向的：脚本读 data/，写一个 JSON 到 Gitea 的静态目录。
+  Gitea 不参与生成，也不参与计算。
+
+用法：
+    python3 tools/gitea-home-data                 # 写到默认位置
+    python3 tools/gitea-home-data --out /tmp/x.json
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "lib"))
+
+import pool  # noqa: E402
+
+DEFAULT_OUT = Path.home() / "gitea" / "custom" / "public" / "assets" / "pool-data.json"
+
+
+def build() -> dict:
+    data = {n: pool.read_jsonl(ROOT / "data" / f"{n}.jsonl") for n in pool.DATA_FILES}
+    status = pool.request_status(data["requests"])
+    proj_d = pool.project(data["deliverables"])
+    proj_r = pool.project(data["requests"])
+    reuse = pool.derive_reuse(data["deliverables"])
+
+    reviewed = sum(
+        1 for v in proj_d.values() if (v.get("review") or {}).get("result") == "pass"
+    )
+    unused = [
+        did
+        for did, v in proj_d.items()
+        if (v.get("review") or {}).get("result") == "pass" and reuse.get(did, 0) == 0
+    ]
+
+    handles = {
+        r["pubkey"]: (r.get("handle") or r["pubkey"][-8:])
+        for r in pool.latest_per_id(data["keyring"]).values()
+        if r.get("pubkey")
+    }
+    balances: dict[str, float] = {}
+    for c in data["credits"]:
+        if c.get("op") in ("mint", "reuse", "royalty", "adjust", "decay"):
+            m, a = c.get("member"), c.get("amount")
+            if isinstance(m, str) and isinstance(a, (int, float)):
+                k = handles.get(m, m[-8:])
+                balances[k] = round(balances.get(k, 0.0) + a, 4)
+
+    open_reqs = [
+        {
+            "id": rid,
+            "title": (proj_r.get(rid) or {}).get("title", ""),
+            "kind": (proj_r.get(rid) or {}).get("artifact_kind", ""),
+            "acceptance": (proj_r.get(rid) or {}).get("acceptance", ""),
+        }
+        for rid, st in sorted(status.items())
+        if st == "open"
+    ]
+
+    return {
+        "generated_at": pool.now_iso(),
+        "counts": {
+            "identities": len(pool.latest_per_id(data["keyring"])),
+            "open": sum(1 for v in status.values() if v == "open"),
+            "accepted": sum(1 for v in status.values() if v == "accepted"),
+            "deliverables": len(proj_d),
+            "reviewed": reviewed,
+            "reused": sum(1 for d in proj_d if reuse.get(d, 0) > 0),
+        },
+        "credit": balances,
+        "open_requests": open_reqs[:8],
+        "unused_accepted": sorted(unused),
+    }
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="生成 Gitea 主页数据")
+    ap.add_argument("--out", default=str(DEFAULT_OUT))
+    args = ap.parse_args()
+
+    payload = build()
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2),
+        encoding="utf-8",
+    )
+    c = payload["counts"]
+    print(f"✓ 已写入 {out}")
+    print(
+        f"  {c['identities']} 个身份 · {c['open']} 张单开着 · "
+        f"{c['accepted']} 张成案 · {c['deliverables']} 件交付物 · "
+        f"{c['reused']} 件被引用"
+    )
+    if payload["unused_accepted"]:
+        print(f"  ★ 通过了但没人用：{', '.join(payload['unused_accepted'])}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
