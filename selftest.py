@@ -205,7 +205,7 @@ def main() -> int:
             [
                 "tools/sign", "req", "--handle", "TestReviewer",
                 "--kind", "answer", "--title", "引用前一件",
-                "--spec", "s", "--acceptance", "a",
+                "--spec", "s", "--acceptance", "含结论与至少一条理由",
             ],
             env,
         )

@@ -341,6 +341,7 @@ def cmd_confirm(args) -> int:
                     f"按 {pool.QUESTION_ROYALTY_RATE:.0%} 结算版税"
                 ),
                 "refs": [qid],
+                "cosign": None,
             }
             pool.append_record(
                 DATA / "credits.jsonl",
@@ -424,6 +425,7 @@ def _mint_for_deliverable(key, deliverable_id: str, kind: str = "mint") -> float
         "amount": amount,
         "reason": why,
         "refs": [deliverable_id],
+        "cosign": None,  # ★ 显式声明"这条不需要联署"，让 p-005 能区分 mint 与 adjust
     }
     pool.append_record(DATA / "credits.jsonl", pool.build_record(DATA / "credits.jsonl", body, key))
     return amount
@@ -510,6 +512,7 @@ def cmd_reuse(args) -> int:
         "amount": delta,
         "reason": f"{args.id} 被引用 {derived} 次，按 ×{pool.reuse_multiplier(derived):.1f} 补发加成 {delta:g}",
         "refs": [args.id],
+        "cosign": None,
     }
     pool.append_record(DATA / "credits.jsonl", pool.build_record(DATA / "credits.jsonl", body, key))
     print(f"  ✓ 补发 {delta:g} credit（累计 {want:g}）")

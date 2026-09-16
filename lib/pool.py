@@ -26,8 +26,9 @@ from cryptography.hazmat.primitives import serialization
 
 SCHEMA_VERSION = "v1"
 
-#: 四份数据文件
-DATA_FILES = ("requests", "deliverables", "credits", "keyring")
+#: 数据文件。前四份是核心，maintainer-log 记录维护者的动作
+#: （异议、回应、权限变更）—— p-006/p-007/p-010 需要它。
+DATA_FILES = ("requests", "deliverables", "credits", "keyring", "maintainer-log")
 
 #: 不参与哈希的字段分两类：
 #:
@@ -476,3 +477,12 @@ def request_status(records: list[dict]) -> dict[str, str]:
 #: 单子多久没人接就算过期（天）。v1 定为 90 天，因为池子还小，
 #: 过早过期会把本来有效的需求误杀掉。有人抱怨太慢再调。
 EXPIRES_DAYS = 90
+
+#: 异议必须在这个天数内被回应（p-007）。一个人掌权时最常用、
+#: 最难防的手段不是乱做事，是不回应。
+OBJECTION_SLA_DAYS = 7
+
+#: 单一来源在单周期内计入的 credit 占比上限（p-008）。
+#: 活跃成员少于 3 人时不执行 —— 三人阶段一个人产出多是正常且应被鼓励的。
+SOURCE_SHARE_CAP = 0.60
+SOURCE_SHARE_MIN_MEMBERS = 3

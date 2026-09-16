@@ -252,7 +252,8 @@ python3 tools/sign credit mint d-xxxxxx-0001
 | `tools/fixlinks` | 链尾错位时重算 `seq` / `prev` |
 | `tools/resolve` | git 合并冲突后去掉标记、去重、重排、重链 |
 | `tools/build-site` | 生成公开展示页 |
-| `make check` | 跑全部测试 |
+| `make check` | 跑全部测试（单元 + 规则 + 端到端） |
+| `tests/test_rules.py` | 11 条规则每条的反例测试 |
 
 ### 冲突：`prev` 对不上
 
@@ -292,6 +293,21 @@ git add -A && git commit -m "merge: 解决冲突"
 ### 私钥丢了
 
 见第一节末尾。**过去的签名永远有效**，只是你没法再用那个身份签新的。
+
+### ⚠️ 永远不要用编辑器直接改 data/*.jsonl
+
+**那会破坏哈希链，校验器立刻报 `hash 与内容不符`。**
+
+想改一条记录只有两条路：
+
+```bash
+# 1) 追加一条修正记录（推荐）
+python3 tools/sign amend deliverables d-xxxxxx-0001 --reason "..." --set 'links=["d-yyy"]'
+```
+
+**2) 如果只是"缺个字段"，优先考虑改判定规则**——让缺省值有确定含义，
+比改数据干净。**（作者自己也踩过：手动给 credit 记录加 cosign 字段，
+结果三条记录的 hash 全坏了。）**
 
 ### 我想改一条已经落账的记录
 

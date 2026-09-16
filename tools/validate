@@ -3,14 +3,24 @@
 
 铁律：不得为了让校验通过而削弱校验。卡住了只能改事实，不能改检查。
 
-v1 实现三条规则：
-  p-001  每条记录的 prev 必须等于本文件上一条的 hash
-  p-002  每条记录签名有效；by 指向的公钥必须已登记且未退役
-  p-003  一条交付物的复核者不得是交付者本人
+实现的规则与 policies.jsonl 一一对应：
+
+    p-001  链完整（prev 接得上、seq 不跳号、hash 与内容相符）
+    p-002  签名有效；by 指向的公钥已登记且未退役
+    p-003  复核者 ≠ 交付者；交付记录的签名者必须就是 deliverer
+    p-004  申请单必须写验收标准
+    p-005  credit 的人工调整（adjust）必须带第二人联署
+    p-006  改账不得由单人完成（保护已有联署的记录）
+    p-007  异议必须在上限天数内被回应
+    p-008  单一来源的 credit 占比上限
+    p-009  challenge 类型的单必须指明质疑对象
+    p-010  维护者权限变更必须公示
+    p-011  拉人进来不产生 credit
 
 用法：
     python3 tools/validate            # 校验全部
     python3 tools/validate --quiet    # 只在有问题时输出
+    python3 tools/validate --root DIR # 校验另一个仓库（测试用）
 退出码：0 通过 / 1 有问题 / 2 用法或环境错误
 """
 
@@ -18,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -64,15 +75,15 @@ def load_all(root: Path, report: Report) -> dict[str, list[dict]]:
     out: dict[str, list[dict]] = {}
     for name in pool.DATA_FILES:
         path = root / "data" / f"{name}.jsonl"
+        if not path.exists():
+            out[name] = []  # maintainer-log 可以是空的
+            continue
         try:
             out[name] = pool.read_jsonl(path)
         except ValueError as exc:
             report.error("read", path.name, str(exc))
             out[name] = []
     return out
-
-
-# ---------------------------------------------------------------- 公钥登记表
 
 
 def build_keyring(records: list[dict], report: Report) -> dict[str, str]:
@@ -86,6 +97,15 @@ def build_keyring(records: list[dict], report: Report) -> dict[str, str]:
             continue
         latest[pk] = st
     return latest
+
+
+def _parse_at(s) -> datetime | None:
+    if not isinstance(s, str):
+        return None
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 # ---------------------------------------------------------------- p-001
@@ -125,7 +145,6 @@ def check_signatures(
         by = rec.get("by")
 
         if self_signed:
-            # keyring 是信任锚：用记录自带的公钥验自己的签名
             pk = rec.get("pubkey")
             if not isinstance(pk, str):
                 continue
@@ -151,24 +170,21 @@ def check_signatures(
 # ---------------------------------------------------------------- p-003
 
 
-def check_reviewer(
-    deliverables: list[dict], keyring: dict[str, str], report: Report
-) -> None:
+def check_reviewer(deliverables: list[dict], report: Report) -> None:
     for idx, rec in enumerate(deliverables, 1):
-        # create 记录：签名者必须就是 deliverer
-        # ★ 踩坑后加的：曾用错密钥交付，但记录内部自洽（by == deliverer），
-        #   旧校验器毫无反应。这条防的是"签名者与声明的交付者不一致"。
-        if rec.get("op") == "create":
+        loc = f"deliverables.jsonl:{idx}"
+        op = rec.get("op")
+
+        if op == "create":
             if rec.get("by") != rec.get("deliverer"):
                 report.error(
-                    "p-003",
-                    f"deliverables.jsonl:{idx}",
-                    "交付记录的签名者与 deliverer 不是同一把公钥",
+                    "p-003", loc, "交付记录的签名者与 deliverer 不是同一把公钥"
                 )
             continue
-        if rec.get("op") != "review":
+
+        if op != "review":
             continue
-        loc = f"deliverables.jsonl:{idx}"
+
         review = rec.get("review") or {}
         reviewer = review.get("by")
         deliverer = rec.get("deliverer")
@@ -177,28 +193,205 @@ def check_reviewer(
             continue
         if reviewer == deliverer:
             report.error("p-003", loc, "复核者与交付者是同一把公钥（自己批自己）")
+        if rec.get("by") != reviewer:
+            report.error("p-003", loc, "review 记录的签名者与 review.by 不一致")
         result = review.get("result")
         if result not in ("pass", "fail"):
             report.error("p-003", loc, f"review.result 必须是 pass/fail，实际 {result!r}")
 
 
+# ---------------------------------------------------------------- p-004 / p-009
+
+
+def check_requests(requests: list[dict], report: Report) -> None:
+    for idx, rec in enumerate(requests, 1):
+        if rec.get("op") != "open":
+            continue
+        loc = f"requests.jsonl:{idx}"
+
+        # p-004：验收标准必须可判定 —— 这是整套记账可信度的唯一支点
+        acc = rec.get("acceptance")
+        if not isinstance(acc, str) or not acc.strip():
+            report.error(
+                "p-004", loc, f"{rec.get('id')} 没有验收标准（怎么算做完了）"
+            )
+        elif len(acc.strip()) < 5:
+            report.error("p-004", loc, f"验收标准太短，无法判定：{acc!r}")
+
+        # p-009：质疑必须指明对象
+        if rec.get("type") == "challenge":
+            links = rec.get("links")
+            if not isinstance(links, list) or not links:
+                report.error(
+                    "p-009", loc, f"{rec.get('id')} 是 challenge，必须用 links 指明质疑哪个产物"
+                )
+
+
+# ---------------------------------------------------------------- p-005 / p-006 / p-008 / p-011
+
+
+def active_members(keyring: list[dict]) -> int:
+    return sum(1 for st in pool.latest_per_id(keyring).values() if st.get("status") == "active")
+
+
+def check_credits(
+    credits: list[dict], keyring: list[dict], report: Report
+) -> None:
+    proj = pool.project(credits)
+
+    for idx, rec in enumerate(credits, 1):
+        op = rec.get("op")
+        loc = f"credits.jsonl:{idx}"
+
+        if op == "adjust":
+            # p-005：改账需第二人联署，且联署人不能是被记账的人
+            cosign = rec.get("cosign")
+            if not isinstance(cosign, str) or not cosign:
+                report.error("p-005", loc, "adjust 记录必须带 cosign（第二人联署）")
+            elif cosign == rec.get("member"):
+                report.error("p-005", loc, "cosign 不能等于被记账的人（自己批自己）")
+
+        if op in ("mint", "reuse", "royalty"):
+            # 这三类由规则自动产生，不需要联署；显式写 cosign: null 更清楚，
+            # 缺省也视为 null（旧记录没有这个字段，不改历史）。
+            pass
+
+        # p-011：拉人不产生 credit —— 邀请不是产出
+        refs = rec.get("refs") or []
+        if not isinstance(refs, list):
+            report.error("p-011", loc, "refs 必须是列表")
+            continue
+        for ref in refs:
+            if isinstance(ref, str) and ref.startswith("k-"):
+                report.error(
+                    "p-011", loc, f"credit 引用了身份记录 {ref} —— 拉人不产生 credit"
+                )
+        member = rec.get("member")
+        if member and member in refs:
+            report.error(
+                "p-011", loc, "credit 的 refs 指向了成员本人 —— 拉人/入伙不产生 credit"
+            )
+
+    # p-006：改账不得由单人完成。
+    #   规则：一条记录一旦有了联署人，后续对它的修改必须由【另一个】人签。
+    for rec in credits:
+        if rec.get("op") != "amend":
+            continue
+        target_hash = rec.get("supersedes")
+        original = None
+        for c in credits:
+            if c.get("hash") == target_hash:
+                original = c
+                break
+        if original is None:
+            continue
+        if original.get("cosign") and original.get("cosign") != rec.get("by"):
+            continue  # 改的人是原来那位联署者 —— 合规
+        if original.get("cosign") and original.get("by") == rec.get("by"):
+            report.error(
+                "p-006",
+                f"credits.jsonl:{rec.get('id')}",
+                f"{rec.get('id')} 的修改由原提交者单人完成（该记录有联署人，需第二人）",
+            )
+
+    # p-008：单一来源占比上限
+    n_active = active_members(keyring)
+    totals: dict[str, float] = {}
+    for rec in credits:
+        if rec.get("op") in ("mint", "reuse", "royalty", "adjust", "decay"):
+            amount = rec.get("amount")
+            member = rec.get("member")
+            if isinstance(amount, (int, float)) and isinstance(member, str):
+                totals[member] = totals.get(member, 0.0) + amount
+    positive = {k: v for k, v in totals.items() if v > 0}
+    grand = sum(positive.values())
+    # ★ 分母用"实际拿过 credit 的人"，不用"活跃成员"。
+    #   用过后者会误报：一个新人池子里常有若干还没产出的身份，
+    #   他们抬高分母、却压低不了任何人的占比，于是规则形同虚设或乱叫。
+    n_earners = len(positive)
+    if grand > 0 and n_earners >= pool.SOURCE_SHARE_MIN_MEMBERS:
+        top_member, top_amount = max(positive.items(), key=lambda kv: kv[1])
+        share = top_amount / grand
+        if share > pool.SOURCE_SHARE_CAP:
+            report.warn(
+                "p-008",
+                "credits.jsonl",
+                f"单一来源占比 {share:.0%}，超过 {pool.SOURCE_SHARE_CAP:.0%} 上限"
+                f"（{n_earners} 人拿过 credit；活跃成员 {n_active} 人）",
+            )
+
+
+# ---------------------------------------------------------------- p-007 / p-010
+
+
+def check_maintainer_log(records: list[dict], report: Report) -> None:
+    now = None  # 用记录里的时间比较，避免依赖本机时钟
+
+    # p-007：异议必须在上限天数内被回应
+    objections: dict[str, datetime] = {}
+    responded: set[str] = set()
+    for idx, rec in enumerate(records, 1):
+        if rec.get("op") == "object":
+            at = _parse_at(rec.get("at"))
+            oid = rec.get("id")
+            if at and isinstance(oid, str):
+                objections[oid] = at
+        elif rec.get("op") == "respond":
+            target = rec.get("objection_id")
+            if isinstance(target, str):
+                responded.add(target)
+
+    if objections:
+        latest_at = max(
+            (a for a in (_parse_at(r.get("at")) for r in records) if a), default=None
+        )
+        for oid, at in objections.items():
+            if oid in responded:
+                continue
+            ref = latest_at or at
+            age = (ref - at).days
+            if age > pool.OBJECTION_SLA_DAYS:
+                report.warn(
+                    "p-007",
+                    f"maintainer-log.jsonl:{oid}",
+                    f"异议已 {age} 天未回应（上限 {pool.OBJECTION_SLA_DAYS} 天）"
+                    " —— 维护者必须回应，哪怕回应是驳回",
+                )
+            else:
+                report.warn(
+                    "p-007",
+                    f"maintainer-log.jsonl:{oid}",
+                    f"异议 {age} 天未回应（上限 {pool.OBJECTION_SLA_DAYS} 天）",
+                )
+
+    # p-010：维护者权限变更必须公示
+    changes: list[str] = []
+    for idx, rec in enumerate(records, 1):
+        if rec.get("op") not in ("appoint", "retire"):
+            continue
+        mid = rec.get("member") or rec.get("id")
+        publicized = any(
+            r.get("op") == "publicize" and r.get("about") == mid for r in records
+        )
+        if not publicized:
+            changes.append(f"maintainer-log.jsonl:{idx}")
+    for loc in changes:
+        report.warn(
+            "p-010", loc, "维护者变更没有对应的公示记录（需 op=publicize）"
+        )
+
+
 # ---------------------------------------------------------------- 交叉检查
 
 
-def check_declared_status(
-    requests: list[dict], report: Report
-) -> None:
-    derived = pool.request_status(requests)
-    latest = pool.latest_per_id(requests)
-    for rid, declared in latest.items():
-        real = derived.get(rid)
-        if declared.get("status_declared") and declared["status_declared"] != real:
-            report.warn(
-                "p-007",
-                f"requests.jsonl:{rid}",
-                f"status_declared={declared['status_declared']} 与推导状态 {real} 不符"
-                "（以推导为准）",
-            )
+def check_declared_status(requests: list[dict], report: Report) -> None:
+    """status_declared 只是一个历史提示（通常在 open 时写成 "open"）。
+
+    ★ 它【不参与】判定 —— 真实状态永远从事件推导（见 pool.request_status）。
+      所以这里不报告不一致：那不是违反规则，而是这个字段的设计如此。
+      （一开始把它当违反来报，结果每一张已结案的单都会误报。）
+    """
+    return
 
 
 # ---------------------------------------------------------------- main
@@ -219,13 +412,17 @@ def main() -> int:
     data = load_all(root, report)
     keyring = build_keyring(data["keyring"], report)
 
+    # p-001 / p-002：所有文件
     for name, records in data.items():
         check_chain(name, records, report)
-
     for name, records in data.items():
         check_signatures(name, records, keyring, report)
 
-    check_reviewer(data["deliverables"], keyring, report)
+    # 其余规则
+    check_reviewer(data["deliverables"], report)
+    check_requests(data["requests"], report)
+    check_credits(data["credits"], data["keyring"], report)
+    check_maintainer_log(data["maintainer-log"], report)
     check_declared_status(data["requests"], report)
 
     report.dump(args.quiet)

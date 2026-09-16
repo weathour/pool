@@ -11,10 +11,13 @@
 PY := python3
 
 check:
-	@echo "=== 单元测试 ==="
+	@echo "=== 单元测试（纯逻辑） ==="
 	@$(PY) tests/test_units.py
 	@echo
-	@echo "=== 端到端自测 ==="
+	@echo "=== 规则测试（11 条 policy 各有反例） ==="
+	@$(PY) tests/test_rules.py
+	@echo
+	@echo "=== 端到端自测（真流程 + 篡改测试） ==="
 	@$(PY) selftest.py
 
 validate:
