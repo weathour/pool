@@ -218,6 +218,28 @@ python3 tools/validate
 | `p-002 公钥未登记` | 你的 `keyring` 记录没在同一个 PR 里 | 把 `keyring.jsonl` 的改动一起提交 |
 | `p-003 复核者与交付者相同` | 你在批自己 | 找另一个人 |
 
+### credit 怎么真的发出来
+
+**门槛是两件事都成立**：复核通过（复核者 ≠ 交付者）**且**开单人确认。
+
+**入账由交付者本人签名**——因为 credit 是本人领的账。所以：
+
+```bash
+# confirm 时会自动入账；如果当时执行 confirm 的人本机没有交付者的私钥，
+# 交付者自己补一条：
+python3 tools/sign credit mint d-xxxxxx-0001
+```
+
+**数额规则：**
+
+| 项 | 规则 |
+|---|---|
+| 定基 | 复核者估的复现时间 ÷ 10 |
+| 复用加成 | ×(1 + min(引用次数, 5) × 0.2)，封顶 ×2.0 |
+| 提问版税 | 引发的产物 credit 之和 × 20%，上限 200 |
+
+**幂等**：同一件交付物不会重复入账。
+
 ### 都有哪些工具
 
 | 工具 | 干什么 |
@@ -225,6 +247,8 @@ python3 tools/validate
 | `tools/sign` | 生成密钥、开单、接单、交付、复核、确认、修正 |
 | `tools/validate` | 校验账本（CI 跑的就是它） |
 | `tools/status` | 一眼看清现状 |
+| `tools/sign credit mint` | 补入账（交付者本人执行） |
+| `tools/sign reuse` | 记一次复用，并补发加成 |
 | `tools/fixlinks` | 链尾错位时重算 `seq` / `prev` |
 | `tools/resolve` | git 合并冲突后去掉标记、去重、重排、重链 |
 | `tools/build-site` | 生成公开展示页 |
