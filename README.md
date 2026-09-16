@@ -77,6 +77,28 @@ keyring.jsonl 第 1 条 hash: 见下方「当期链尾」
 **之后所有记录都链在它后面。** 签名 tag 打在周期末尾，tag 的说明里写入各份
 文件的链尾哈希 —— 那是 **sha256**，与 git 用哪种对象格式无关。
 
+### 怎么验周期 tag
+
+```bash
+git config gpg.ssh.allowedSignersFile .allowed_signers   # 一行，指向仓库里的名单
+git tag -v cycle-2026-Q3
+```
+
+应当看到：
+
+```
+Good "git" signature for mr.weathour@gmail.com with ED25519 key SHA256:K/Qt…
+```
+
+**tag 的说明里还写着那一期的五份链尾哈希。** 把它和你本地算出来的对一下：
+
+```bash
+python3 tools/cycle --json | python3 -m json.tool | grep -A6 chain_heads
+```
+
+**为什么这有用：** 即使有人改了历史，他也伪造不了这个 tag ——
+签名密钥不在他手里。**而 `.allowed_signers` 本身也在 git 里，改它是看得见的。**
+
 > 为什么不用 SHA-256 git 仓库：GitHub / Gitea / GitLab **全都不支持**，
 > 用了就无法推送到任何 forge。详见 [`docs/`](docs/)。
 

@@ -1,12 +1,13 @@
 # 池子 —— 常用命令
 #
-#   make check     跑全部测试（单元 + 端到端）
+#   make check     跑全部测试（单元 + 规则 + 端到端）
 #   make validate  只校验账本
 #   make status    一眼看清现状
+#   make cycle     周期结算（只报告，不写）
 #   make site      生成展示页到 site/
 #   make clean     清理构建产物
 
-.PHONY: check validate status site clean
+.PHONY: check validate status cycle site clean
 
 PY := python3
 
@@ -26,6 +27,9 @@ validate:
 status:
 	@$(PY) tools/validate --quiet
 	@$(PY) tools/status
+
+cycle:
+	@$(PY) tools/cycle
 
 site:
 	@$(PY) tools/build-site

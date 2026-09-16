@@ -252,6 +252,8 @@ python3 tools/sign credit mint d-xxxxxx-0001
 | `tools/fixlinks` | 链尾错位时重算 `seq` / `prev` |
 | `tools/resolve` | git 合并冲突后去掉标记、去重、重排、重链 |
 | `tools/build-site` | 生成公开展示页 |
+| `tools/cycle` | 周期结算；`--tag` 打签名 tag |
+| `tools/status --json` | 现状的机器可读输出 |
 | `make check` | 跑全部测试（单元 + 规则 + 端到端） |
 | `tests/test_rules.py` | 11 条规则每条的反例测试 |
 

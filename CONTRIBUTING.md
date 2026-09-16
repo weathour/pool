@@ -178,6 +178,26 @@ git add -A && git commit -m "merge: 解决冲突"
 
 ---
 
+## 怎么验证这个池子
+
+**三步，不需要读任何源码：**
+
+```bash
+# 1. 校验账本：链、签名、复核者是否不同、以及全部 11 条规则
+python3 tools/validate
+
+# 2. 验证周期 tag 的签名（证明"那一期就是这样"）
+git config gpg.ssh.allowedSignersFile .allowed_signers
+git tag -v cycle-2026-Q3
+
+# 3. 看现状（--json 给机器读）
+python3 tools/status
+```
+
+**这三步都不需要信任任何服务器，也不需要信任维护者。** 这就是全部的可信度来源。
+
+---
+
 ## 出问题找谁
 
 看 `MAINTAINERS.md`。
