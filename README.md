@@ -22,6 +22,7 @@
 | **交付物**（交了什么、谁复核的） | [`data/deliverables.jsonl`](data/deliverables.jsonl) |
 | **账本**（谁该得多少） | [`data/credits.jsonl`](data/credits.jsonl) |
 | **公钥目录**（谁是谁） | [`data/keyring.jsonl`](data/keyring.jsonl) |
+| **维护者动作**（异议、回应、权限变更） | [`data/maintainer-log.jsonl`](data/maintainer-log.jsonl) |
 | **规则** | [`policies.jsonl`](policies.jsonl) |
 | **维护者** | [`MAINTAINERS.md`](MAINTAINERS.md) |
 
@@ -73,7 +74,7 @@ python3 tools/validate
 keyring.jsonl 第 1 条 hash: 见下方「当期链尾」
 ```
 
-**之后所有记录都链在它后面。** 签名 tag 打在周期末尾，tag 的说明里写入四份
+**之后所有记录都链在它后面。** 签名 tag 打在周期末尾，tag 的说明里写入各份
 文件的链尾哈希 —— 那是 **sha256**，与 git 用哪种对象格式无关。
 
 > 为什么不用 SHA-256 git 仓库：GitHub / Gitea / GitLab **全都不支持**，
