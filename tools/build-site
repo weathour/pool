@@ -81,6 +81,7 @@ def build_view(data: dict) -> dict:
         for k, v in deliv_latest.items()
         if v.get("request_id") and v.get("deliverer")
     }
+    reuse_map = pool.derive_reuse(data["deliverables"])
     deliverables = []
     for did, rec in sorted(creates.items()):
         review = rec.get("review") or {}
@@ -96,7 +97,7 @@ def build_view(data: dict) -> dict:
                 "reason": review.get("reason") if review else None,
                 "minutes": base,
                 "credit": round(base / 10, 1) if isinstance(base, (int, float)) else None,
-                "reuse": rec.get("reuse_count", 0),
+                "reuse": reuse_map.get(did, 0),  # ★ 由 links 推导，不看自报
                 "at": rec.get("at", "")[:10],
             }
         )

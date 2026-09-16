@@ -27,7 +27,9 @@ def main() -> int:
     reviewed = sum(1 for v in proj.values() if (v.get("review") or {}).get("result") == "pass")
     failed = sum(1 for v in proj.values() if (v.get("review") or {}).get("result") == "fail")
     pending = len(proj) - reviewed - failed
-    reused = sum(1 for v in proj.values() if (v.get("reuse_count") or 0) > 0)
+    # ★ 复用次数由 links 推导，不看自报的 reuse_count 字段
+    reuse_map = pool.derive_reuse(deliverables)
+    reused = sum(1 for did in proj if reuse_map.get(did, 0) > 0)
 
     balances: Counter[str] = Counter()
     handles = {
@@ -52,6 +54,11 @@ def main() -> int:
         f"交付物    {len(proj)} 件"
         f"（{reviewed} 通过 / {failed} 打回 / {pending} 待复核）"
         f"  其中 {reused} 件被引用过"
+        + (
+            "（" + "  ".join(f"{k}×{v}" for k, v in sorted(reuse_map.items())) + "）"
+            if reuse_map
+            else ""
+        )
     )
     if balances:
         print("credit    " + "  ".join(f"{k}={v:g}" for k, v in balances.most_common()))
@@ -63,7 +70,8 @@ def main() -> int:
         unused = [
             k
             for k, v in proj.items()
-            if (v.get("review") or {}).get("result") == "pass" and not (v.get("reuse_count") or 0)
+            if (v.get("review") or {}).get("result") == "pass"
+            and reuse_map.get(k, 0) == 0
         ]
         if unused:
             print()
