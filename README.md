@@ -118,7 +118,7 @@ python3 tools/cycle --json | python3 -m json.tool | grep -A6 chain_heads
 签名密钥不在他手里。**而 `.allowed_signers` 本身也在 git 里，改它是看得见的。**
 
 > 为什么不用 SHA-256 git 仓库：GitHub / Gitea / GitLab **全都不支持**，
-> 用了就无法推送到任何 forge。详见 [`docs/`](docs/)。
+> 用了就无法推送到任何 forge。详见 [`docs/04-ARCHITECTURE.md`](docs/04-ARCHITECTURE.md)。
 
 ---
 
@@ -151,9 +151,19 @@ python3 tools/cycle --json | python3 -m json.tool | grep -A6 chain_heads
 
 ## 设计文档
 
-完整的判断依据、被否掉的方案、以及踩过的坑，都在 `docs/` 下。
+完整的判断依据、被否掉的方案、以及踩过的坑，都在 **[`docs/`](docs/)** 下。
 
-**先读 [`docs/00-一句话版本.md`](docs/00-一句话版本.md)。**
+**先读 [`docs/01-OVERVIEW.md`](docs/01-OVERVIEW.md)** —— 一页讲清这是什么。
+
+| 想读 | 去哪 |
+|---|---|
+| 这到底是什么 | [`docs/01-OVERVIEW.md`](docs/01-OVERVIEW.md) |
+| **为什么这么选、什么被否掉了** | [`docs/DECISIONS.md`](docs/DECISIONS.md) |
+| credit 怎么算 | [`docs/02-credit.md`](docs/02-credit.md) |
+| 要做成什么 | [`docs/03-POSITIONING.md`](docs/03-POSITIONING.md) |
+| 三层架构怎么分 | [`docs/04-ARCHITECTURE.md`](docs/04-ARCHITECTURE.md) |
+| 谁说了算 | [`docs/05-GOVERNANCE.md`](docs/05-GOVERNANCE.md) |
+| 现在什么状态、接下来做什么 | [`docs/06-OPERATIONS.md`](docs/06-OPERATIONS.md) |
 
 ---
 

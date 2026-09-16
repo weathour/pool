@@ -118,7 +118,14 @@ def check_tools_documented(f: Findings) -> None:
         f.error("tools/", "目录不存在")
         return
 
+    # ★ 也要看 docs/ 下的活文档 —— 工具的使用说明常常写在那边
+    #   （例如 tools/gitea-home-data 只出现在 docs/06-OPERATIONS.md）。
     blob = "\n".join(read(d) for d in DOCS)
+    docs_dir = ROOT / "docs"
+    if docs_dir.is_dir():
+        # ★ 循环变量不能用 f —— 那会覆盖 Findings 参数 f
+        for doc in sorted(docs_dir.glob("*.md")):
+            blob += "\n" + doc.read_text(encoding="utf-8")
     for path in sorted(tools_dir.iterdir()):
         if path.name.startswith("_") or path.name in INTERNAL_TOOLS:
             continue

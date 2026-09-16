@@ -140,11 +140,12 @@ finally:
 section("新增一个工具但没写进文档")
 repo = make_repo()
 try:
-    tool = repo / "tools" / "brand-new-tool"
+    # 名字要保证在任何文档里都不出现 —— 否则检查器认为"它有文档"，测试就假失败
+    tool = repo / "tools" / "zzz-undocumented-probe"
     tool.write_text("#!/usr/bin/env python3\nprint('hi')\n", encoding="utf-8")
     tool.chmod(0o755)
     res = run_meta(repo)
-    check("被警告（不是 error）", res.returncode == 0 and "brand-new-tool" in res.stdout, res.stdout)
+    check("被警告（不是 error）", res.returncode == 0 and "zzz-undocumented-probe" in res.stdout, res.stdout)
     check("级别是 WARN", "WARN" in res.stdout, res.stdout)
 finally:
     shutil.rmtree(repo, ignore_errors=True)
