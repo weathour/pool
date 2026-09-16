@@ -310,6 +310,116 @@ def deliverable_status(records: list[dict]) -> dict[str, str]:
     return out
 
 
+# ---------------------------------------------------------------- credit 定价
+#
+# 依据见 docs/03-credit基于什么.md：
+#   定基     = 复核者估的复现时间 / 10   ← 定价权在复核者手里，不在交付者手里
+#   效果加成 = × (1 + min(复用次数, 5) × 0.2)
+#   门槛     = 复核通过（复核者 ≠ 交付者）+ 开单人确认
+#
+# ★ 为什么要"复核者估"而不是"交付者报"：自报必然虚报且无法验证。
+#   复核者反正要读一遍，估这个是顺手的事，换个复核者还能交叉校对。
+
+MINUTES_PER_CREDIT = 10
+REUSE_BONUS_PER = 0.2
+REUSE_BONUS_CAP = 5
+
+
+def base_credit(reproduce_minutes) -> float:
+    """定基：复现时间换算成 credit。"""
+    if not isinstance(reproduce_minutes, (int, float)) or reproduce_minutes <= 0:
+        return 0.0
+    return round(float(reproduce_minutes) / MINUTES_PER_CREDIT, 4)
+
+
+def reuse_multiplier(reuse_count) -> float:
+    """效果加成。复用是唯一无法伪造的信号 —— 引用别人要先读懂它。"""
+    if not isinstance(reuse_count, (int, float)) or reuse_count <= 0:
+        return 1.0
+    return 1.0 + min(int(reuse_count), REUSE_BONUS_CAP) * REUSE_BONUS_PER
+
+
+def final_credit(reproduce_minutes, reuse_count=0) -> float:
+    return round(base_credit(reproduce_minutes) * reuse_multiplier(reuse_count), 4)
+
+
+QUESTION_ROYALTY_RATE = 0.2
+QUESTION_ROYALTY_CAP = 200.0
+
+
+def royalty_for(generated: float) -> float:
+    """一个问题的版税 = 它引发的产物 credit 之和 × 20%，有上限。
+
+    ★ 问题不能按复现成本算：一个好问题的复现成本是负的 ——
+      别人不是"从零想出这个问题"，是根本想不到它。
+    """
+    if generated <= 0:
+        return 0.0
+    return round(min(generated * QUESTION_ROYALTY_RATE, QUESTION_ROYALTY_CAP), 4)
+
+
+def generated_by(requests: list[dict], deliverables: list[dict], credits: list[dict],
+                 question_id: str) -> float:
+    """某个问题（question 类型的单）已经引发的产物 credit 之和。"""
+    # ★ 用 project 而不是"最后一条记录"：artifact_kind / links 在 open 记录里，
+    #   claim/confirm 那些增量记录里没有它们（踩过两次这个坑）。
+    proj = project(requests)
+    req = proj.get(question_id)
+    if req is None or req.get("artifact_kind") != "question":
+        return 0.0
+
+    # ★ links 在【申请单】上，不在交付物上（踩过这个坑）。
+    #   所以要先找出"哪些单引用了这个问题"，再找那些单下面的交付物。
+    linked_requests = {question_id}
+    for rid, r in proj.items():
+        if question_id in (r.get("links") or []):
+            linked_requests.add(rid)
+
+    linked = {
+        d.get("id")
+        for d in deliverables
+        if d.get("op") == "create" and d.get("request_id") in linked_requests
+    }
+
+    total = 0.0
+    for c in credits:
+        if c.get("op") in ("mint", "reuse", "reuse_bonus"):
+            refs = c.get("refs") or []
+            if any(r in linked for r in refs):
+                total += c.get("amount") or 0
+    return round(total, 4)
+
+
+def is_reviewed_pass(deliverables: list[dict], did: str) -> dict | None:
+    """某件交付物的通过复核记录（没有就返回 None）。"""
+    found = None
+    for rec in deliverables:
+        if rec.get("id") == did and rec.get("op") == "review":
+            if (rec.get("review") or {}).get("result") == "pass":
+                found = rec
+    return found
+
+
+def review_minutes(deliverables: list[dict], did: str) -> float | None:
+    """从复核记录里取复现时间估计。"""
+    rec = is_reviewed_pass(deliverables, did)
+    if not rec:
+        return None
+    m = (rec.get("review") or {}).get("reproduce_minutes")
+    return m if isinstance(m, (int, float)) and m > 0 else None
+
+
+def credited_deliverables(credits: list[dict]) -> set[str]:
+    """已经入过账的交付物 id —— 保证幂等，不会重复发。"""
+    out = set()
+    for rec in credits:
+        if rec.get("op") in ("mint", "reuse"):
+            for ref in rec.get("refs") or []:
+                if isinstance(ref, str) and ref.startswith("d-"):
+                    out.add(ref)
+    return out
+
+
 def request_status(records: list[dict]) -> dict[str, str]:
     """从事件推导每张单的当前状态。永远以推导为准，不看 status_declared。"""
     ops: dict[str, set[str]] = {}

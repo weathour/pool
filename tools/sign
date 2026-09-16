@@ -240,7 +240,7 @@ def cmd_confirm(args) -> int:
     pub = pool.public_of(load_key(handle))
 
     records = pool.read_jsonl(DATA / "requests.jsonl")
-    opener = pool.latest_per_id(records).get(args.id, {}).get("by")
+    opener = pool.project(records).get(args.id, {}).get("by")
     if opener is None:
         die(f"找不到单子 {args.id}")
 
@@ -248,15 +248,293 @@ def cmd_confirm(args) -> int:
     deliverers = {
         d.get("deliverer") for d in delivs if d.get("request_id") == args.id
     }
-    if pub in deliverers and pub != opener:
-        die("交付者不能自己确认自己的交付物 —— 需要开单人确认。")
+    already_confirmed = any(
+        r.get("id") == args.id and r.get("op") == "confirm" for r in records
+    )
 
-    return _request_op(handle, args.id, "confirm", {})
+    if pub in deliverers and pub != opener and not already_confirmed:
+        die(
+            "交付者不能自己确认自己的交付物 —— 需要开单人确认。\n"
+            "  （如果开单人已经确认过，你只是想补入账，用：\n"
+            f"    python3 tools/sign credit mint {next(iter([
+                d['id'] for d in delivs
+                if d.get('request_id') == args.id and d.get('op') == 'create'
+            ]), '<交付物 id>')}）"
+        )
+
+    if already_confirmed:
+        # 已确认过 —— 这次只是补入账，不再追加 confirm 记录
+        print(f"（{args.id} 已由开单人确认过，这次只补入账）")
+    else:
+        rc = _request_op(handle, args.id, "confirm", {})
+        if rc != 0:
+            return rc
+
+    # ★ 确认之后自动入账 —— 这是 credit 真正产生的地方。
+    #
+    # 注意：入账必须由【交付者】签名（credit 是本人领的账），
+    # 而执行 confirm 的通常是【开单人】。所以这里按交付者的公钥
+    # 在本机找对应私钥；找不到就跳过，让交付者自己跑 `sign reuse`/`confirm`
+    # 补上，绝不静默用错钥签名。
+    delivs = pool.read_jsonl(DATA / "deliverables.jsonl")
+    mine = [
+        r.get("id")
+        for r in delivs
+        if r.get("op") == "create" and r.get("request_id") == args.id
+    ]
+    minted = 0.0
+    skipped = []
+    for did in mine:
+        deliverer = None
+        for r in delivs:
+            if r.get("id") == did and r.get("op") == "create":
+                deliverer = r.get("deliverer")
+        if not deliverer:
+            continue
+        dkey = find_key_for(deliverer)
+        if dkey is None:
+            skipped.append(did)
+            continue
+        amt = _mint_for_deliverable(dkey, did)
+        if amt:
+            print(f"  ✓ 入账 {amt:g} credit（{did}）")
+            minted += amt
+
+    # ★ 版税：结算给【这张单所引用的那些问题】的提问者。
+    #
+    # 踩过的坑：一开始写成"当这张单是 question 时结算"，那是错的 ——
+    # 实际被确认的是【引用了问题的那个产物】，所以要看 links 指向谁。
+    reqs = pool.read_jsonl(DATA / "requests.jsonl")
+    latest_reqs = pool.project(reqs)  # ★ 用 project：links/artifact_kind 在 open 记录里
+    this_req = latest_reqs.get(args.id, {})
+    linked_questions = [
+        q for q in (this_req.get("links") or []) if latest_reqs.get(q, {}).get("artifact_kind") == "question"
+    ]
+
+    if linked_questions:
+        credits = pool.read_jsonl(DATA / "credits.jsonl")
+        for qid in linked_questions:
+            asker = latest_reqs.get(qid, {}).get("by")
+            if not asker:
+                continue
+            generated = pool.generated_by(reqs, delivs, credits, qid)
+            want = pool.royalty_for(generated)
+            already = sum(
+                c.get("amount", 0)
+                for c in credits
+                if c.get("op") == "royalty" and qid in (c.get("refs") or [])
+            )
+            delta = round(want - already, 4)
+            if delta <= 0:
+                continue
+            akey = find_key_for(asker)
+            if akey is None:
+                skipped.append(f"{qid}（提问者版税 {delta:g}）")
+                continue
+            cbody = {
+                "id": f"c-{len(pool.latest_per_id(credits)) + 1:04d}",
+                "op": "royalty",
+                "member": asker,
+                "amount": delta,
+                "reason": (
+                    f"{qid} 是提问，它引发的产物累计 {generated:g} credit，"
+                    f"按 {pool.QUESTION_ROYALTY_RATE:.0%} 结算版税"
+                ),
+                "refs": [qid],
+            }
+            pool.append_record(
+                DATA / "credits.jsonl",
+                pool.build_record(DATA / "credits.jsonl", cbody, akey),
+            )
+            print(f"  ✓ 提问者版税 +{delta:g} credit（{qid}）")
+
+    if skipped:
+        print(
+            f"  ⚠ 有 {len(skipped)} 件交付物没能入账：本机没有交付者的私钥。\n"
+            f"     {', '.join(skipped)}\n"
+            "     让交付者本人跑一次 confirm（或等他自己跑 sign reuse）即可补上。"
+        )
+    elif mine and minted == 0:
+        print("  （这次没有入账：可能已入过账，或复核者没估复现时间）")
+    return 0
 
 
 def cmd_close(args) -> int:
     handle = resolve_handle(args.handle)
     return _request_op(handle, args.id, "close", {"reason": args.reason})
+
+
+def _mint_for_deliverable(key, deliverable_id: str, kind: str = "mint") -> float | None:
+    """给一件交付物入账。返回入账数额；不需要入账则返回 None。
+
+    幂等：同一交付物不会重复入账（credits.credited_deliverables 会把关）。
+    签名者必须是交付者本人 —— 因为 credit 是"我承认我做了这件事并领这份账"。
+    """
+    delivs = pool.read_jsonl(DATA / "deliverables.jsonl")
+    credits = pool.read_jsonl(DATA / "credits.jsonl")
+
+    target = None
+    for rec in delivs:
+        if rec.get("id") == deliverable_id and rec.get("op") == "create":
+            target = rec
+    if target is None:
+        die(f"找不到交付物 {deliverable_id}")
+
+    deliverer = target.get("deliverer")
+    if pool.public_of(key) != deliverer:
+        die(
+            "只有交付者本人能为这件交付物入账。\n"
+            f"  交付者是 {deliverer[-16:] if deliverer else '？'}，"
+            f"而你手上是 {pool.public_of(key)[-16:]}"
+        )
+
+    if deliverable_id in pool.credited_deliverables(credits):
+        return None  # 幂等：已入过账
+
+    # ★ credit 的门槛是两件事都成立：复核通过 + 开单人确认。
+    #   缺任何一件都不入账（踩过坑：只查了复核，结果未确认就发了账）。
+    req_id = target.get("request_id")
+    if req_id:
+        reqs = pool.read_jsonl(DATA / "requests.jsonl")
+        req = pool.project(reqs).get(req_id, {})
+        raw = pool.read_jsonl(DATA / "requests.jsonl")
+        confirmed = any(
+            r.get("id") == req_id and r.get("op") == "confirm" for r in raw
+        )
+        if not confirmed:
+            return None
+
+    minutes = pool.review_minutes(delivs, deliverable_id)
+    if minutes is None:
+        return None  # 没有通过复核，或复核者没估复现时间
+
+    amount = pool.base_credit(minutes)
+    if amount <= 0:
+        return None
+
+    body = {
+        "id": f"c-{len(pool.latest_per_id(credits)) + 1:04d}",
+        "op": kind,
+        "member": deliverer,
+        "amount": amount,
+        "reason": f"{deliverable_id} 通过复核并确认；复核者估复现 {minutes:g} 分钟",
+        "refs": [deliverable_id],
+    }
+    pool.append_record(DATA / "credits.jsonl", pool.build_record(DATA / "credits.jsonl", body, key))
+    return amount
+
+
+def cmd_credit_mint(args) -> int:
+    """给一件已确认的交付物入账。
+
+    为什么要单独一条命令：credit 由【交付者】签名（本人领的账），
+    而 confirm 通常由【开单人】执行。所以交付者需要一个自己的入口 ——
+    否则他的 credit 永远发不出来。（真踩过这个坑）
+    """
+    handle = resolve_handle(args.handle)
+    key = load_key(handle)
+    amt = _mint_for_deliverable(key, args.id)
+    if amt:
+        print(f"✓ 入账 {amt:g} credit")
+        return 0
+
+    # 说清为什么没入
+    delivs = pool.read_jsonl(DATA / "deliverables.jsonl")
+    credits = pool.read_jsonl(DATA / "credits.jsonl")
+    if args.id in pool.credited_deliverables(credits):
+        print("（已经入过账，不重复发）")
+    elif pool.review_minutes(delivs, args.id) is None:
+        print("（还没有通过复核，或复核者没估复现时间）")
+    else:
+        print("（开单人还没确认这张单，或开单人就是交付者本人）")
+    return 0
+
+
+def cmd_reuse(args) -> int:
+    """记一次复用，并按加成补发 credit 给交付者。
+
+    复用是唯一无法伪造的加成项 —— 引用别人要先读懂它。
+    """
+    handle = resolve_handle(args.handle)
+    key = load_key(handle)
+    delivs = pool.read_jsonl(DATA / "deliverables.jsonl")
+
+    target = None
+    for rec in delivs:
+        if rec.get("id") == args.id and rec.get("op") == "create":
+            target = rec
+    if target is None:
+        die(f"找不到交付物 {args.id}")
+
+    # 追加一条 reuse 记录（公开层，不写人名）
+    body = {
+        "id": args.id,
+        "op": "reuse",
+        "request_id": target.get("request_id"),
+        "deliverer": target.get("deliverer"),
+        "artifact_kind": target.get("artifact_kind"),
+        "reuse_count": (target.get("reuse_count") or 0) + 1,
+        "reason": args.reason,
+    }
+    pool.append_record(DATA / "deliverables.jsonl", pool.build_record(DATA / "deliverables.jsonl", body, key))
+    print(f"✓ {args.id} 复用 +1（第 {body['reuse_count']} 次）")
+
+    # 补发差额：最终值 - 已发值
+    minutes = pool.review_minutes(delivs, args.id)
+    if minutes is None:
+        print("  （还没有通过复核，先记复用，credit 等复核后再算）")
+        return 0
+
+    credits = pool.read_jsonl(DATA / "credits.jsonl")
+    already = sum(
+        c.get("amount", 0)
+        for c in credits
+        if c.get("op") in ("mint", "reuse") and args.id in (c.get("refs") or [])
+    )
+    want = pool.final_credit(minutes, body["reuse_count"])
+    delta = round(want - already, 4)
+    if delta <= 0:
+        print(f"  credit 已经是 {already:g}，不需要补发")
+        return 0
+
+    mint_key = _load_key_for(target.get("deliverer"))
+    cbody = {
+        "id": f"c-{len(pool.latest_per_id(credits)) + 1:04d}",
+        "op": "reuse",
+        "member": target.get("deliverer"),
+        "amount": delta,
+        "reason": f"{args.id} 第 {body['reuse_count']} 次被引用，补发加成 {delta:g}",
+        "refs": [args.id],
+    }
+    pool.append_record(DATA / "credits.jsonl", pool.build_record(DATA / "credits.jsonl", cbody, mint_key))
+    print(f"  ✓ 补发 {delta:g} credit（累计 {want:g}）")
+    return 0
+
+
+def find_key_for(pubkey: str):
+    """按公钥在本机找对应私钥。找不到返回 None（绝不静默用错钥）。"""
+    if not KEYDIR.exists():
+        return None
+    for path in sorted(KEYDIR.glob("*.key")):
+        try:
+            k = pool.load_private(path.read_bytes())
+        except Exception:
+            continue
+        if pool.public_of(k) == pubkey:
+            return k
+    return None
+
+
+def _load_key_for(pubkey: str):
+    """同上，但找不到就报错退出。"""
+    k = find_key_for(pubkey)
+    if k is None:
+        die(
+            f"本机没有与 {pubkey[-16:]} 对应的私钥。\n"
+            f"  找过这些：{KEYDIR}\n"
+            "  入账需要交付者本人的私钥（credit 是本人领的账）。"
+        )
+    return k
 
 
 def cmd_amend(args) -> int:
@@ -329,7 +607,7 @@ def cmd_deliver(args) -> int:
         did = next_id("d", pub, list(pool.latest_per_id(pool.read_jsonl(path))))
 
     reqs = pool.read_jsonl(DATA / "requests.jsonl")
-    latest_req = pool.latest_per_id(reqs)
+    latest_req = pool.project(reqs)  # ★ 同上
     if args.request not in latest_req:
         die(f"找不到单子 {args.request}")
 
@@ -470,6 +748,17 @@ def main() -> int:
     p.add_argument("id")
     p.add_argument("--reason", required=True)
     p.set_defaults(func=cmd_close)
+
+    p = sub.add_parser("credit", help="credit 相关")
+    csub = p.add_subparsers(dest="credit_cmd", required=True)
+    cm = csub.add_parser("mint", help="给一件已确认的交付物入账（由交付者本人执行）")
+    cm.add_argument("id", help="交付物 id")
+    cm.set_defaults(func=cmd_credit_mint)
+
+    p = sub.add_parser("reuse", help="记一次复用（引用别人的产物）")
+    p.add_argument("id", help="被引用的交付物 id")
+    p.add_argument("--reason", required=True, help="你在哪里、为什么引用了它")
+    p.set_defaults(func=cmd_reuse)
 
     p = sub.add_parser("amend", help="修正一条已落账的记录（追加，不覆盖）")
     p.add_argument("file", help="requests / deliverables / credits / keyring")

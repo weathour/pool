@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import json as _json_b
 import os
 import shutil
 import subprocess
@@ -57,6 +58,12 @@ def main() -> int:
         name: len([l for l in blob.decode("utf-8").splitlines() if l.strip()])
         for name, blob in backup.items()
     }
+    # credit 的基线【金额】（不只是条数）——仓库里可能已有真账
+    baseline_credit = sum(
+        _json_b.loads(l).get("amount", 0)
+        for l in backup["credits"].decode("utf-8").splitlines()
+        if l.strip()
+    )
     print(f"\n基线条数：{baseline}")
 
     ok = True
@@ -173,6 +180,91 @@ def main() -> int:
         print("\n[7] 开单人确认")
         run(["tools/sign", "confirm", "--handle", "TestReviewer", rid], env)
         check("确认已记录", True)
+
+        print("\n[7.5] ★ credit 是否真的入账了")
+        creds = [
+            l
+            for l in (ROOT / "data" / "credits.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if l.strip()
+        ]
+        check("credits.jsonl 有入账记录", len(creds) > baseline["credits"], f"{len(creds)} 条")
+        if creds:
+            import json as _j
+
+            last = _j.loads(creds[-1])
+            check("入账金额 = 复核者估的复现时间 / 10", abs(last["amount"] - 3.0) < 1e-6,
+                  f"金额 {last.get('amount')}（复核者估了 30 分钟 → 应为 3.0）")
+            check("入账记录带 refs（指向交付物）", last.get("refs") == [did], str(last.get("refs")))
+
+        print("\n[7.6] ★ 复用会补发加成")
+        run(["tools/sign", "reuse", "--handle", "TestReviewer", did,
+             "--reason", "在另一处引用了它"], env)
+        creds2 = [
+            l
+            for l in (ROOT / "data" / "credits.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if l.strip()
+        ]
+        check("复用后多了一条入账", len(creds2) == len(creds) + 1, f"{len(creds)} → {len(creds2)}")
+        total = sum(_j.loads(l)["amount"] for l in creds2)
+        # 本次测试产生的 credit = 定基 3.0 × (1 + 1×0.2) = 3.6
+        produced = round(total - baseline_credit, 4)
+        check("本次产生的 credit = 定基 × 1.2（复用 1 次）",
+              abs(produced - 3.6) < 1e-6,
+              f"本次产生 {produced}（基线 {baseline_credit}）")
+
+        print("\n[7.7] ★ 反问版税：一个新问题引发了产物，提问者应得 20%")
+        # 开第二个单：answer，links 指向第一个问题
+        run(
+            [
+                "tools/sign", "req",
+                "--handle", "TestReviewer",
+                "--kind", "answer",
+                "--title", "回答那个问题",
+                "--spec", "一段回答",
+                "--acceptance", "给出结论与至少一条理由",
+                "--link", rid,
+            ],
+            env,
+        )
+        rid2 = latest_id("requests")
+        run(["tools/sign", "claim", "--handle", "TestDeliverer", rid2], env)
+        c2 = tmp / "c2.json"
+        c2.write_text(_j.dumps({"text": "结论：分界在定价，不在回报。"}, ensure_ascii=False), encoding="utf-8")
+        run(
+            ["tools/sign", "deliver", "--handle", "TestDeliverer",
+             "--request", rid2, "--kind", "answer", "--content-file", str(c2)],
+            env,
+        )
+        did2 = latest_id("deliverables")
+        run(["tools/sign", "review", "--handle", "TestReviewer", did2,
+             "--result", "pass", "--reason", "结论清楚", "--reproduce-minutes", "20"], env)
+
+        before = [
+            _j.loads(l)
+            for l in (ROOT / "data" / "credits.jsonl").read_text(encoding="utf-8").splitlines()
+            if l.strip()
+        ]
+        run(["tools/sign", "confirm", "--handle", "TestReviewer", rid2], env)
+        after = [
+            _j.loads(l)
+            for l in (ROOT / "data" / "credits.jsonl").read_text(encoding="utf-8").splitlines()
+            if l.strip()
+        ]
+        royalties = [c for c in after[len(before):] if c.get("op") == "royalty"]
+        check("产生了版税记录", len(royalties) == 1, f"新增 {len(after) - len(before)} 条，其中版税 {len(royalties)} 条")
+        if royalties:
+            # 这个问题引发的产物此时已累计：
+            #   question 本身 30 分钟 → 3.0，再被复用 1 次 → 3.0 × 1.2 = 3.6
+            #   answer 20 分钟 → 2.0
+            # 合计 5.6；版税 20% → 1.12
+            check("版税 = 引发产物 credit 之和 × 20%",
+                  abs(royalties[0]["amount"] - 1.12) < 1e-6,
+                  f"版税 {royalties[0]['amount']}（应为 1.12）")
+            check("版税记在被引用的问题上", royalties[0]["refs"] == [rid], str(royalties[0]["refs"]))
 
         print("\n[8] 校验器应当全部通过")
         r = run(["tools/validate"], env)

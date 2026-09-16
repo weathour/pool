@@ -172,6 +172,23 @@ _latest = pool.latest_per_id([ev("a", "open"), ev("b", "open"), ev("a", "claim")
 check("latest_per_id 取每个 id 最后一条", _latest["a"]["op"] == "claim")
 check("latest_per_id 保留两个 id", set(_latest) == {"a", "b"})
 
+section("credit 定价")
+check("复现 45 分钟 → 4.5", pool.base_credit(45) == 4.5, str(pool.base_credit(45)))
+check("复现 0 分钟 → 0", pool.base_credit(0) == 0.0)
+check("复现 None → 0", pool.base_credit(None) == 0.0)
+check("不复用 → ×1.0", pool.reuse_multiplier(0) == 1.0)
+check("复用 1 次 → ×1.2", abs(pool.reuse_multiplier(1) - 1.2) < 1e-9)
+check("复用 5 次 → ×2.0", abs(pool.reuse_multiplier(5) - 2.0) < 1e-9)
+check("复用 9 次封顶 → ×2.0", abs(pool.reuse_multiplier(9) - 2.0) < 1e-9)
+check("最终 = 定基 × 加成", abs(pool.final_credit(45, 3) - 7.2) < 1e-9,
+      str(pool.final_credit(45, 3)))
+check("版税 = 20%", abs(pool.royalty_for(15) - 3.0) < 1e-9)
+check("版税有上限 200", pool.royalty_for(5000) == 200.0)
+
+# ★ 关键的防作弊性质：自问自答自交付不产生 credit
+check("自己闭环拿不到 credit（无复核者估时则不入账）",
+      pool.review_minutes([], "d-x") is None)
+
 section("p-003：签名者必须就是交付者")
 import shutil  # noqa: E402
 import subprocess  # noqa: E402
