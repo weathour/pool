@@ -208,10 +208,16 @@ def check_git_hooks(f: Findings) -> None:
             ["git", "config", "--get", "core.hooksPath"], cwd=ROOT, text=True
         ).strip()
     except (subprocess.CalledProcessError, FileNotFoundError):
-        f.warn("git", "没有设 core.hooksPath —— 镜像钩子不会生效")
-        return
+        hp = ""
     if not hp:
-        f.warn("git", "core.hooksPath 是空的")
+        # 只在钩子文件确实存在、但没挂上时报警。
+        # 普通 clone 没有钩子目录，那是正常的 —— 一开始无条件报警，
+        # 结果每个外部 clone 跑 verify-meta 都会看到一个无意义的警告。
+        if (ROOT / ".githooks" / "pre-push").exists():
+            f.warn(
+                "git",
+                "有 .githooks/pre-push 但没设 core.hooksPath —— 镜像钩子不会生效",
+            )
         return
     d = ROOT / hp
     if not d.is_dir():
