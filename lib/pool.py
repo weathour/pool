@@ -415,13 +415,21 @@ def derive_reuse(deliverables: list[dict]) -> dict[str, int]:
     ★ 为什么要推导而不是让作者自己报：复用是 credit 唯一的加成项，
       如果靠自报就失去了"无法伪造"这个性质。
       引用一件东西必须先读懂它 —— 没人会为了给别人刷分去读没用的东西。
+
+    ★ 必须基于 project() 而不是原始事件流：一件交付物被 amend 之后，
+      它的 links 在【修正记录】里，原始 create 记录里还是旧值。
+      （踩过这个坑：amend 改对了 links，但复用计数仍然是 0）
     """
     counts: dict[str, int] = {}
-    for rec in deliverables:
-        if rec.get("op") != "create":
+    for did, rec in project(deliverables).items():
+        if not rec.get("deliverer"):
+            continue  # 不是真正的交付物
+        links = rec.get("links")
+        if not isinstance(links, list):
+            # 类型不对就当没有 —— 宁可少算，不要因为脏数据算错
             continue
-        for link in rec.get("links") or []:
-            if isinstance(link, str) and link.startswith("d-"):
+        for link in links:
+            if isinstance(link, str) and link.startswith("d-") and link != did:
                 counts[link] = counts.get(link, 0) + 1
     return counts
 

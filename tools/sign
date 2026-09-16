@@ -577,7 +577,12 @@ def cmd_amend(args) -> int:
         if "=" not in pair:
             die(f"--set 格式应为 key=value，收到 {pair!r}")
         k, v = pair.split("=", 1)
-        body[k] = v
+        # ★ 尝试按 JSON 解析，这样 links=[...] 得到的是列表而不是字符串。
+        #   （踩过坑：--set 'links=["d-x"]' 被存成字符串，后续推导复用全部失效）
+        try:
+            body[k] = json.loads(v)
+        except (json.JSONDecodeError, ValueError):
+            body[k] = v
 
     pool.append_record(path, pool.build_record(path, body, key))
     print(f"✓ {args.id} 的修正已追加到 {args.file}.jsonl")
