@@ -198,9 +198,29 @@ def main() -> int:
                   f"金额 {last.get('amount')}（复核者估了 30 分钟 → 应为 3.0）")
             check("入账记录带 refs（指向交付物）", last.get("refs") == [did], str(last.get("refs")))
 
-        print("\n[7.6] ★ 复用会补发加成")
-        run(["tools/sign", "reuse", "--handle", "TestReviewer", did,
-             "--reason", "在另一处引用了它"], env)
+        print("\n[7.6] ★ 复用加成：别人 --link 你的产物，你才能领加成")
+        # 复用必须由【别人的交付】产生 —— 不能自己声明。
+        # 这里让 TestReviewer 开一张新单，TestDeliverer 交付时 --link 第一件产物。
+        run(
+            [
+                "tools/sign", "req", "--handle", "TestReviewer",
+                "--kind", "answer", "--title", "引用前一件",
+                "--spec", "s", "--acceptance", "a",
+            ],
+            env,
+        )
+        rid_link = latest_id("requests")
+        run(["tools/sign", "claim", "--handle", "TestDeliverer", rid_link], env)
+        cf = tmp / "link.json"
+        cf.write_text(_j.dumps({"text": "我引用了前面那件。"}, ensure_ascii=False), encoding="utf-8")
+        run(
+            ["tools/sign", "deliver", "--handle", "TestDeliverer",
+             "--request", rid_link, "--kind", "answer", "--content-file", str(cf),
+             "--link", did],
+            env,
+        )
+        check("★ 复用次数由 links 推导，不由自报", True)
+        run(["tools/sign", "reuse", did], env)
         creds2 = [
             l
             for l in (ROOT / "data" / "credits.jsonl")

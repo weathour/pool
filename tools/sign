@@ -408,16 +408,21 @@ def _mint_for_deliverable(key, deliverable_id: str, kind: str = "mint") -> float
     if minutes is None:
         return None  # 没有通过复核，或复核者没估复现时间
 
-    amount = pool.base_credit(minutes)
+    # ★ 复用次数从 links 推导，不由作者自报 —— 这是加成项无法伪造的前提
+    reuse = pool.derive_reuse(delivs).get(deliverable_id, 0)
+    amount = pool.final_credit(minutes, reuse)
     if amount <= 0:
         return None
 
+    why = f"{deliverable_id} 通过复核并确认；复核者估复现 {minutes:g} 分钟"
+    if reuse:
+        why += f"；被引用 {reuse} 次 → ×{pool.reuse_multiplier(reuse):.1f}"
     body = {
         "id": f"c-{len(pool.latest_per_id(credits)) + 1:04d}",
         "op": kind,
         "member": deliverer,
         "amount": amount,
-        "reason": f"{deliverable_id} 通过复核并确认；复核者估复现 {minutes:g} 分钟",
+        "reason": why,
         "refs": [deliverable_id],
     }
     pool.append_record(DATA / "credits.jsonl", pool.build_record(DATA / "credits.jsonl", body, key))
@@ -451,13 +456,17 @@ def cmd_credit_mint(args) -> int:
 
 
 def cmd_reuse(args) -> int:
-    """记一次复用，并按加成补发 credit 给交付者。
+    """结算一件交付物的复用加成。
 
-    复用是唯一无法伪造的加成项 —— 引用别人要先读懂它。
+    ★ 复用次数由 links 推导（derive_reuse），不由任何人自报 ——
+      因为复用是 credit 唯一的加成项，自报就失去了"无法伪造"这个性质。
+      所以这条命令不"加一次"，它只是**按当前推导值补发差额**。
+
+    典型用法：别人交付时用 `--link <你的产物>` 引用了你，你跑这条把加成领了。
     """
     handle = resolve_handle(args.handle)
-    key = load_key(handle)
     delivs = pool.read_jsonl(DATA / "deliverables.jsonl")
+    credits = pool.read_jsonl(DATA / "credits.jsonl")
 
     target = None
     for rec in delivs:
@@ -466,47 +475,43 @@ def cmd_reuse(args) -> int:
     if target is None:
         die(f"找不到交付物 {args.id}")
 
-    # 追加一条 reuse 记录（公开层，不写人名）
-    body = {
-        "id": args.id,
-        "op": "reuse",
-        "request_id": target.get("request_id"),
-        "deliverer": target.get("deliverer"),
-        "artifact_kind": target.get("artifact_kind"),
-        "reuse_count": (target.get("reuse_count") or 0) + 1,
-        "reason": args.reason,
-    }
-    pool.append_record(DATA / "deliverables.jsonl", pool.build_record(DATA / "deliverables.jsonl", body, key))
-    print(f"✓ {args.id} 复用 +1（第 {body['reuse_count']} 次）")
-
-    # 补发差额：最终值 - 已发值
+    deliverer = target.get("deliverer")
     minutes = pool.review_minutes(delivs, args.id)
     if minutes is None:
-        print("  （还没有通过复核，先记复用，credit 等复核后再算）")
+        die(f"{args.id} 还没有通过复核，或复核者没估复现时间 —— 定基算不出来")
+
+    derived = pool.derive_reuse(delivs).get(args.id, 0)
+    if derived <= 0:
+        print(f"（{args.id} 目前没有被任何产物通过 --link 引用，推导复用 = 0）")
+        print("  复用必须是别人在交付时显式 --link 你，不能自己声明。")
         return 0
 
-    credits = pool.read_jsonl(DATA / "credits.jsonl")
+    # 已经入过的账（定基 + 之前的加成）
     already = sum(
         c.get("amount", 0)
         for c in credits
         if c.get("op") in ("mint", "reuse") and args.id in (c.get("refs") or [])
     )
-    want = pool.final_credit(minutes, body["reuse_count"])
+    want = pool.final_credit(minutes, derived)
     delta = round(want - already, 4)
+
+    print(f"  定基 {pool.base_credit(minutes):g}（复现 {minutes:g} 分钟）"
+          f"  推导复用 {derived} 次 → ×{pool.reuse_multiplier(derived):.1f}"
+          f"  应为 {want:g}  已发 {already:g}")
     if delta <= 0:
-        print(f"  credit 已经是 {already:g}，不需要补发")
+        print("  ✓ 不需要补发")
         return 0
 
-    mint_key = _load_key_for(target.get("deliverer"))
-    cbody = {
+    key = _load_key_for(deliverer)
+    body = {
         "id": f"c-{len(pool.latest_per_id(credits)) + 1:04d}",
         "op": "reuse",
-        "member": target.get("deliverer"),
+        "member": deliverer,
         "amount": delta,
-        "reason": f"{args.id} 第 {body['reuse_count']} 次被引用，补发加成 {delta:g}",
+        "reason": f"{args.id} 被引用 {derived} 次，按 ×{pool.reuse_multiplier(derived):.1f} 补发加成 {delta:g}",
         "refs": [args.id],
     }
-    pool.append_record(DATA / "credits.jsonl", pool.build_record(DATA / "credits.jsonl", cbody, mint_key))
+    pool.append_record(DATA / "credits.jsonl", pool.build_record(DATA / "credits.jsonl", body, key))
     print(f"  ✓ 补发 {delta:g} credit（累计 {want:g}）")
     return 0
 
@@ -630,6 +635,7 @@ def cmd_deliver(args) -> int:
         "deliverer": pub,
         "content": content,
         "reproduce_minutes": args.reproduce_minutes,
+        "links": args.link or [],
         "reuse_count": 0,
     }
     pool.append_record(path, pool.build_record(path, body, key))
@@ -730,6 +736,9 @@ def main() -> int:
     p.add_argument("--content-file", default=None, help="产物内容的 JSON 文件")
     p.add_argument("--reproduce-minutes", type=int, default=None,
                    help="你自己估的工时（仅供参考，定价权在复核者）")
+    p.add_argument("--link", action="append", default=[],
+                   help="这件产物引用/回应了哪些已有单（可重复）。"
+                        "被引用的东西会算复用，这是 credit 唯一的加成项")
     p.set_defaults(func=cmd_deliver)
 
     p = sub.add_parser("review", help="复核（不能复核自己的）")
@@ -755,9 +764,9 @@ def main() -> int:
     cm.add_argument("id", help="交付物 id")
     cm.set_defaults(func=cmd_credit_mint)
 
-    p = sub.add_parser("reuse", help="记一次复用（引用别人的产物）")
-    p.add_argument("id", help="被引用的交付物 id")
-    p.add_argument("--reason", required=True, help="你在哪里、为什么引用了它")
+    p = sub.add_parser("reuse", help="结算复用加成（别人 --link 了你的产物）")
+    p.add_argument("id", help="你的交付物 id")
+    p.add_argument("--reason", default=None, help="可选说明")
     p.set_defaults(func=cmd_reuse)
 
     p = sub.add_parser("amend", help="修正一条已落账的记录（追加，不覆盖）")

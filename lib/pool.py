@@ -409,6 +409,23 @@ def review_minutes(deliverables: list[dict], did: str) -> float | None:
     return m if isinstance(m, (int, float)) and m > 0 else None
 
 
+def derive_reuse(deliverables: list[dict]) -> dict[str, int]:
+    """从 links 推导每件交付物被引用了几次。
+
+    ★ 为什么要推导而不是让作者自己报：复用是 credit 唯一的加成项，
+      如果靠自报就失去了"无法伪造"这个性质。
+      引用一件东西必须先读懂它 —— 没人会为了给别人刷分去读没用的东西。
+    """
+    counts: dict[str, int] = {}
+    for rec in deliverables:
+        if rec.get("op") != "create":
+            continue
+        for link in rec.get("links") or []:
+            if isinstance(link, str) and link.startswith("d-"):
+                counts[link] = counts.get(link, 0) + 1
+    return counts
+
+
 def credited_deliverables(credits: list[dict]) -> set[str]:
     """已经入过账的交付物 id —— 保证幂等，不会重复发。"""
     out = set()
