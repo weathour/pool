@@ -1,0 +1,235 @@
+#!/usr/bin/env python3
+"""一致性检查 —— 管的是"记录之外"的东西。
+
+为什么需要它：
+  tools/validate 只检查 data/ 里的账本。但一个仓库还会烂在别的地方：
+
+    · MAINTAINERS.md 说是权威，CODEOWNERS 说"从它生成" —— 谁核对过？
+    · 文档里写的工具、文件、命令，删了或改名了就变成谎言
+    · policies.jsonl 声明了 11 条，校验器实现了 11 条吗？
+    · tools/ 下的工具有没有在人看得到的地方列出来？
+    · docs/README.md 的索引和 docs/ 里实际的文件对得上吗？
+
+  这些都**不会**让账本失效，但会让新人踩空 ——
+  而"新人能不能上手"是这套东西最要紧的事。
+
+用法：
+    python3 tools/verify-meta            # 检查，有问题返回 1
+    python3 tools/verify-meta --quiet    # 只在有问题时输出
+    python3 tools/verify-meta --json     # 机器可读
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "lib"))
+
+import pool  # noqa: E402
+
+#: 人应当读得到的文档（用来检查"工具是否有文档"）
+DOCS = ("README.md", "CONTRIBUTING.md", "CONTRIBUTORS.md", "别人怎么用.md")
+
+#: 内部工具，不需要在给新人看的文档里列出来
+INTERNAL_TOOLS = {"push-main.sh"}
+
+
+class Findings:
+    def __init__(self) -> None:
+        self.items: list[tuple[str, str, str]] = []  # (level, where, msg)
+
+    def error(self, where: str, msg: str) -> None:
+        self.items.append(("ERROR", where, msg))
+
+    def warn(self, where: str, msg: str) -> None:
+        self.items.append(("WARN", where, msg))
+
+    @property
+    def errors(self) -> int:
+        return sum(1 for i in self.items if i[0] == "ERROR")
+
+    def dump(self, quiet: bool, as_json: bool) -> None:
+        if as_json:
+            print(
+                json.dumps(
+                    [{"level": l, "where": w, "msg": m} for l, w, m in self.items],
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return
+        if quiet and not self.items:
+            return
+        for level, where, msg in self.items:
+            print(f"{level:<5} {where:<26} {msg}")
+        if self.items:
+            print(f"------ {len(self.items)} 项")
+        elif not quiet:
+            print("✓ 全部一致")
+
+
+def read(*parts: str) -> str:
+    path = ROOT.joinpath(*parts)
+    return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
+# ---------------------------------------------------------------- 各项检查
+
+
+def check_codeowners(f: Findings) -> None:
+    """CODEOWNERS 里出现的人，必须在 MAINTAINERS.md 里；且它声明是派生的。"""
+    co = read("CODEOWNERS")
+    mt = read("MAINTAINERS.md")
+    if not co or not mt:
+        f.error("CODEOWNERS", "CODEOWNERS 或 MAINTAINERS.md 缺失")
+        return
+
+    if "从 MAINTAINERS.md 生成" not in co and "派生" not in co:
+        f.warn(
+            "CODEOWNERS",
+            "没说清它是从 MAINTAINERS.md 派生的（权威在 MAINTAINERS.md）",
+        )
+
+    co_users = {u.lstrip("@") for u in re.findall(r"@([A-Za-z0-9_.-]+)", co)}
+    for user in sorted(co_users):
+        if user not in mt:
+            f.error(
+                "CODEOWNERS",
+                f"@{user} 出现在 CODEOWNERS 但不在 MAINTAINERS.md 里"
+                "（谁是维护者只有一个权威来源）",
+            )
+
+    # MAINTAINERS.md 里引用的 keyring id 必须存在
+    ids = set(pool.latest_per_id(pool.read_jsonl(ROOT / "data" / "keyring.jsonl")))
+    for kid in re.findall(r"\b(k-[0-9a-f-]+)\b", mt):
+        if kid not in ids:
+            f.error("MAINTAINERS.md", f"引用了不存在的 keyring id：{kid}")
+
+
+def check_tools_documented(f: Findings) -> None:
+    """tools/ 下的每个工具都应当在人看得到的文档里被提到。"""
+    tools_dir = ROOT / "tools"
+    if not tools_dir.is_dir():
+        f.error("tools/", "目录不存在")
+        return
+
+    blob = "\n".join(read(d) for d in DOCS)
+    for path in sorted(tools_dir.iterdir()):
+        if path.name.startswith("_") or path.name in INTERNAL_TOOLS:
+            continue
+        if path.is_dir():
+            continue
+        if f"tools/{path.name}" not in blob:
+            f.warn(
+                "tools/",
+                f"{path.name} 没有被任何一份给新人看的文档提到"
+                "（别人不知道它存在）",
+            )
+
+
+def check_doc_paths(f: Findings) -> None:
+    """文档里以 ./ 或字母开头的仓库内路径，必须真的存在。"""
+    pattern = re.compile(r"`((?:docs/|tools/|lib/|tests/|data/|cycles/|\.gitea/|\.github/|scripts/)[\w./\u4e00-\u9fff-]+)`")
+    seen: set[str] = set()
+    for doc in DOCS + ("docs/README.md",):
+        for ref in pattern.findall(read(doc)):
+            if ref in seen:
+                continue
+            seen.add(ref)
+            if not ROOT.joinpath(ref).exists():
+                f.error(doc, f"引用了不存在的路径：`{ref}`")
+
+
+def check_policies_implemented(f: Findings) -> None:
+    """policies.jsonl 声明的每条，校验器里都要出现。"""
+    declared = []
+    for line in read("policies.jsonl").splitlines():
+        line = line.strip()
+        if line:
+            declared.append(json.loads(line)["id"])
+    src = read("tools", "validate")
+    for pid in declared:
+        if f'"{pid}"' not in src:
+            f.error("policies.jsonl", f"{pid} 被声明但校验器里没有实现")
+    if not declared:
+        f.error("policies.jsonl", "一条规则都没有")
+
+
+def check_data_files(f: Findings) -> None:
+    """pool.DATA_FILES 与实际文件、与文档说法要对得上。"""
+    for name in pool.DATA_FILES:
+        if not (ROOT / "data" / f"{name}.jsonl").exists():
+            f.error("data/", f"{name}.jsonl 在 DATA_FILES 里但文件不存在")
+
+    actual = {p.stem for p in (ROOT / "data").glob("*.jsonl")}
+    extra = actual - set(pool.DATA_FILES)
+    if extra:
+        f.warn("data/", f"有文件不在 DATA_FILES 里：{sorted(extra)}")
+
+
+def check_docs_index(f: Findings) -> None:
+    """docs/README.md 的索引要和 docs/ 实际的文件对得上。"""
+    index = read("docs", "README.md")
+    if not index:
+        f.warn("docs/", "没有 docs/README.md（新人不知道先读哪份）")
+        return
+    missing = []
+    for path in sorted((ROOT / "docs").glob("*.md")):
+        if path.name == "README.md":
+            continue
+        if path.name not in index:
+            missing.append(path.name)
+    for name in missing:
+        f.warn("docs/README.md", f"索引里没有 {name}")
+
+
+def check_allowed_signers(f: Findings) -> None:
+    """签名名单是否配好、且能对应到本人。"""
+    path = ROOT / ".allowed_signers"
+    if not path.exists():
+        f.warn(".allowed_signers", "没有它，别人无法验证周期 tag 的签名")
+        return
+    text = path.read_text(encoding="utf-8")
+    if "ssh-ed25519" not in text and "ssh-rsa" not in text:
+        f.error(".allowed_signers", "里面没有可用的公钥")
+
+
+def check_templates(f: Findings) -> None:
+    """issue / PR 模板要放在两个地方（Gitea 读 .gitea，GitHub 读 .github）。"""
+    for base in (".gitea", ".github"):
+        if not (ROOT / base / "ISSUE_TEMPLATE").is_dir():
+            f.warn(base, "缺少 ISSUE_TEMPLATE/（网页开单的表单就没了）")
+    if not (ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md").exists():
+        f.warn(".github", "缺少 PULL_REQUEST_TEMPLATE.md")
+
+
+# ---------------------------------------------------------------- main
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="仓库一致性检查")
+    ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args()
+
+    f = Findings()
+    check_codeowners(f)
+    check_tools_documented(f)
+    check_doc_paths(f)
+    check_policies_implemented(f)
+    check_data_files(f)
+    check_docs_index(f)
+    check_allowed_signers(f)
+    check_templates(f)
+
+    f.dump(args.quiet, args.json)
+    return 1 if f.errors else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

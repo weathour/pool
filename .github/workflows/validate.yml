@@ -19,8 +19,11 @@ jobs:
       - name: 安装依赖
         run: pip install cryptography
 
-      - name: 校验账本
+      - name: 校验账本（五份 JSONL + 11 条规则）
         run: python3 tools/validate
+
+      - name: 校验仓库自身的元一致性
+        run: python3 tools/verify-meta
 
       - name: 单元测试
         run: python3 tests/test_units.py

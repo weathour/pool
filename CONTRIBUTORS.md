@@ -254,6 +254,7 @@ python3 tools/sign credit mint d-xxxxxx-0001
 | `tools/build-site` | 生成公开展示页 |
 | `tools/cycle` | 周期结算；`--tag` 打签名 tag |
 | `tools/status --json` | 现状的机器可读输出 |
+| `tools/verify-meta` | 检查仓库自身的元一致性（文档/工具/规则是否对得上） |
 | `make check` | 跑全部测试（单元 + 规则 + 端到端） |
 | `tests/test_rules.py` | 11 条规则每条的反例测试 |
 

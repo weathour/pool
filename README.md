@@ -135,7 +135,7 @@ python3 tools/cycle --json | python3 -m json.tool | grep -A6 chain_heads
 
 完整的判断依据、被否掉的方案、以及踩过的坑，都在 `docs/` 下。
 
-**先读 [`docs/一句话版本.md`](docs/一句话版本.md)。**
+**先读 [`docs/00-一句话版本.md`](docs/00-一句话版本.md)。**
 
 ---
 

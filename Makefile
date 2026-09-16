@@ -2,12 +2,13 @@
 #
 #   make check     跑全部测试（单元 + 规则 + 端到端）
 #   make validate  只校验账本
+#   make meta      只校验仓库自身的元一致性
 #   make status    一眼看清现状
 #   make cycle     周期结算（只报告，不写）
 #   make site      生成展示页到 site/
 #   make clean     清理构建产物
 
-.PHONY: check validate status cycle site clean
+.PHONY: check validate meta status cycle site clean
 
 PY := python3
 
@@ -18,11 +19,18 @@ check:
 	@echo "=== 规则测试（11 条 policy 各有反例） ==="
 	@$(PY) tests/test_rules.py
 	@echo
+	@echo "=== 元一致性（文档/工具/规则对得上吗） ==="
+	@$(PY) tools/verify-meta
+	@$(PY) tests/test_meta.py
+	@echo
 	@echo "=== 端到端自测（真流程 + 篡改测试） ==="
 	@$(PY) selftest.py
 
 validate:
 	@$(PY) tools/validate
+
+meta:
+	@$(PY) tools/verify-meta
 
 status:
 	@$(PY) tools/validate --quiet
