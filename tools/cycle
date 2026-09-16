@@ -1,0 +1,290 @@
+#!/usr/bin/env python3
+"""周期结算 —— 把当期状态钉成一个值，并打上签名 tag。
+
+为什么需要它：
+  「任何人都能独立验证」这句话在当期是成立的，但**过了一段时间之后**，
+  你怎么证明"三月份的时候账本就是这样"？答案是周期性的签名 tag：
+  tag 指向某个提交，说明里写入五份文件的链尾哈希。
+
+  ★ 关键区分（这是设计里的一个坑，值得记住）：
+    tag **不是**账本记录，它不改变 data/ 里的任何东西。
+    所以它不会使自己的内容失效 —— 如果 tag 里记的哈希会因为它自己而改变，
+    那就是循环引用，永远对不上。
+
+它做什么：
+  1. 统计当期数字（成案数 / 打回率 / 过期数 / 复用数 / 单点占比）
+  2. 生成一份结算报告（人能读 + --json 给机器读）
+  3. 打印出"接下来该做什么"（提交、打 tag 的完整命令）
+  4. 加 --tag 时顺带把签名 tag 打上
+
+用法：
+    python3 tools/cycle                      # 看当期数字，不写任何东西
+    python3 tools/cycle --write              # 写报告
+    python3 tools/cycle --write --tag        # 写报告并打签名 tag
+    python3 tools/cycle --period 2026-Q4     # 指定周期名
+    python3 tools/cycle --json               # 只输出 JSON（给机器读）
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+from collections import Counter
+from datetime import datetime, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "lib"))
+
+import pool  # noqa: E402
+
+
+def default_period() -> str:
+    now = datetime.now(timezone.utc)
+    return f"{now.year}-Q{(now.month - 1) // 3 + 1}"
+
+
+def last_cycle() -> str | None:
+    """上一个周期 tag 的名字（用于确定本周期从哪开始）。"""
+    try:
+        out = subprocess.check_output(
+            ["git", "tag", "--list", "cycle-*", "--sort=-creatordate"],
+            cwd=ROOT,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+    return out.splitlines()[0] if out else None
+
+
+def gather() -> dict:
+    data = {}
+    for name in pool.DATA_FILES:
+        data[name] = pool.read_jsonl(ROOT / "data" / f"{name}.jsonl")
+
+    requests = data["requests"]
+    deliverables = data["deliverables"]
+    credits = data["credits"]
+    keyring = data["keyring"]
+
+    status = pool.request_status(requests)
+    counts = Counter(status.values())
+    proj_d = pool.project(deliverables)
+    proj_r = pool.project(requests)
+
+    reviewed_pass = sum(
+        1 for v in proj_d.values() if (v.get("review") or {}).get("result") == "pass"
+    )
+    reviewed_fail = sum(
+        1 for v in proj_d.values() if (v.get("review") or {}).get("result") == "fail"
+    )
+    reuse_map = pool.derive_reuse(deliverables)
+    reused = sum(1 for did in proj_d if reuse_map.get(did, 0) > 0)
+
+    # 账目
+    handles = {
+        r["pubkey"]: (r.get("handle") or r["pubkey"][-8:])
+        for r in pool.latest_per_id(keyring).values()
+        if r.get("pubkey")
+    }
+    balances: dict[str, float] = {}
+    for c in credits:
+        if c.get("op") in ("mint", "reuse", "royalty", "adjust", "decay"):
+            member, amount = c.get("member"), c.get("amount")
+            if isinstance(member, str) and isinstance(amount, (int, float)):
+                key = handles.get(member, member[-8:])
+                balances[key] = round(balances.get(key, 0.0) + amount, 4)
+
+    n_earners = sum(1 for v in balances.values() if v > 0)
+    total_credit = round(sum(v for v in balances.values() if v > 0), 4)
+    top_share = (
+        round(max(v for v in balances.values() if v > 0) / total_credit, 4)
+        if total_credit > 0 and n_earners > 0
+        else 0.0
+    )
+
+    # 最值得看的一条：通过了但没人用
+    unused = sorted(
+        did
+        for did, v in proj_d.items()
+        if (v.get("review") or {}).get("result") == "pass" and reuse_map.get(did, 0) == 0
+    )
+
+    # 链尾（每份文件的最后一条 hash）—— 这是与 git 无关的锚点
+    chain_heads = {
+        name: (data[name][-1]["hash"] if data[name] else None)
+        for name in pool.DATA_FILES
+    }
+
+    opened = counts.get("open", 0) + counts.get("claimed", 0) + counts.get("delivered", 0)
+    closed = counts.get("closed", 0) + counts.get("withdrawn", 0)
+
+    return {
+        "period": None,  # 由 main 填
+        "generated_at": pool.now_iso(),
+        "counts": {
+            "identities": len(pool.latest_per_id(keyring)),
+            "requests_total": len(proj_r),
+            "open": counts.get("open", 0),
+            "claimed": counts.get("claimed", 0),
+            "delivered": counts.get("delivered", 0),
+            "accepted": counts.get("accepted", 0),
+            "closed": closed,
+            "in_flight": opened,
+            "deliverables": len(proj_d),
+            "review_pass": reviewed_pass,
+            "review_fail": reviewed_fail,
+            "reused": reused,
+        },
+        "credit": {
+            "balances": balances,
+            "total_positive": total_credit,
+            "earners": n_earners,
+            "top_share": top_share,
+        },
+        "unused_accepted": unused,
+        "chain_heads": chain_heads,
+    }
+
+
+def render(report: dict) -> str:
+    c = report["counts"]
+    k = report["credit"]
+    L: list[str] = []
+    L.append(f"# 周期结算：{report['period']}")
+    L.append("")
+    L.append(f"- 生成时间：{report['generated_at']}")
+    L.append(f"- 身份：{c['identities']} 个")
+    L.append("")
+    L.append("## 单子")
+    L.append("")
+    L.append("| 状态 | 数 |")
+    L.append("|---|---|")
+    for key, label in (
+        ("open", "开着等人接"),
+        ("claimed", "已接单"),
+        ("delivered", "已交付待复核"),
+        ("accepted", "已成案"),
+        ("closed", "已结案（含决定不做）"),
+    ):
+        L.append(f"| {label} | {c[key]} |")
+    L.append(f"| **累计** | **{c['requests_total']}** |")
+    L.append("")
+    L.append("## 交付物")
+    L.append("")
+    L.append(f"- 共 {c['deliverables']} 件")
+    L.append(f"- 复核通过 {c['review_pass']} 件 / 打回 {c['review_fail']} 件")
+    L.append(f"- **被引用过 {c['reused']} 件**")
+    if c["deliverables"]:
+        rate = c["review_fail"] / max(c["review_pass"] + c["review_fail"], 1)
+        L.append(f"- 打回率 {rate:.0%}")
+    L.append("")
+    L.append("## credit")
+    L.append("")
+    if k["balances"]:
+        L.append("| 身份 | credit |")
+        L.append("|---|---|")
+        for name, amount in sorted(k["balances"].items(), key=lambda kv: -kv[1]):
+            L.append(f"| {name} | {amount:g} |")
+        L.append("")
+        L.append(
+            f"拿过 credit 的 {k['earners']} 人，合计 {k['total_positive']:g}；"
+            f"单一来源最高占比 {k['top_share']:.0%}。"
+        )
+    else:
+        L.append("（还没有入账）")
+    L.append("")
+    L.append("## ★ 通过了但没人用")
+    L.append("")
+    if report["unused_accepted"]:
+        for did in report["unused_accepted"]:
+            L.append(f"- `{did}`")
+        L.append("")
+        L.append(
+            "它们都有第二人复核，但没有任何产物通过 `--link` 引用。"
+            "**要么是我们需要的东西和别人不一样，要么是它们没被看见。**"
+        )
+    else:
+        L.append("（无 —— 每件通过的产物都至少被引用过一次）")
+    L.append("")
+    L.append("## 链尾（这个锚点与 git 无关）")
+    L.append("")
+    L.append("```")
+    for name, h in report["chain_heads"].items():
+        L.append(f"{name+'.jsonl':24} {h or '（空）'}")
+    L.append("```")
+    L.append("")
+    L.append(
+        "打 tag 时把这几个哈希写进说明里。**它们覆盖的是文件内容，"
+        "与 git 用哪种对象格式无关** —— 所以即使 git 层将来换哈希，"
+        "这些锚点仍然成立。"
+    )
+    L.append("")
+    return "\n".join(L)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="周期结算")
+    ap.add_argument("--period", default=None, help="周期名，默认按当前季度")
+    ap.add_argument("--write", action="store_true", help="写报告文件")
+    ap.add_argument("--tag", action="store_true", help="打签名 tag（需要已提交）")
+    ap.add_argument("--json", action="store_true", help="只输出 JSON")
+    ap.add_argument("--out", default=None, help="报告输出路径")
+    args = ap.parse_args()
+
+    period = args.period or default_period()
+    report = gather()
+    report["period"] = period
+    report["previous_cycle"] = last_cycle()
+
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2))
+        return 0
+
+    text = render(report)
+    print(text)
+
+    if not args.write and not args.tag:
+        print()
+        print("（只报告，没有写任何东西。加 --write 写报告，--write --tag 一并打 tag）")
+        return 0
+
+    out = Path(args.out) if args.out else ROOT / "cycles" / f"{period}.md"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(text, encoding="utf-8")
+    print()
+    print(f"✓ 报告已写入 {out.relative_to(ROOT)}")
+
+    if args.tag:
+        msg = f"周期 {period}\n\n" + "\n".join(
+            f"{name}: {h or '（空）'}" for name, h in report["chain_heads"].items()
+        )
+        r = subprocess.run(
+            ["git", "tag", "-s", f"cycle-{period}", "-m", msg],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        if r.returncode != 0:
+            print(f"✗ 打 tag 失败：{(r.stderr or r.stdout).strip()}", file=sys.stderr)
+            print("  （签名 tag 需要本机配好 GPG 或 SSH 签名密钥；")
+            print("   没配好就先只用 --write，tag 等你配好再补）")
+            return 1
+        print(f"✓ 已打签名 tag cycle-{period}")
+        print("  推上去：git push origin main --tags")
+    else:
+        print()
+        print("下一步（按顺序）：")
+        print(f"  1. git add {out.relative_to(ROOT)}")
+        print(f'  2. git commit -m "cycle: {period} 结算"')
+        print(f"  3. python3 tools/cycle --tag        # 提交之后再打 tag")
+        print(f"  4. git push origin main --tags")
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,10 @@
+# 允许的签名者 —— 用于验证本仓库的签名 tag。
+#
+# 格式：<身份> <密钥类型> <公钥>
+# 验证方式：
+#   git config gpg.ssh.allowedSignersFile .allowed_signers
+#   git tag -v cycle-<周期>
+#
+# ★ 这份文件本身也在 git 里，所以它被改过是看得见的：
+#   改动会进 git 历史，而历史由哈希链和签名保护。
+mr.weathour@gmail.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGijYamxNTfu4WHfDATrWGFZy0ebWvL3gOYpQFEJRpXE

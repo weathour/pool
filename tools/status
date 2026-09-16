@@ -13,7 +13,8 @@ import pool  # noqa: E402
 from collections import Counter  # noqa: E402
 
 
-def main() -> int:
+def collect() -> dict:
+    """把现状收成一个 dict —— 既给人看，也能 --json 给机器看。"""
     d = ROOT / "data"
     requests = pool.read_jsonl(d / "requests.jsonl")
     deliverables = pool.read_jsonl(d / "deliverables.jsonl")
@@ -26,22 +27,67 @@ def main() -> int:
 
     reviewed = sum(1 for v in proj.values() if (v.get("review") or {}).get("result") == "pass")
     failed = sum(1 for v in proj.values() if (v.get("review") or {}).get("result") == "fail")
-    pending = len(proj) - reviewed - failed
-    # ★ 复用次数由 links 推导，不看自报的 reuse_count 字段
     reuse_map = pool.derive_reuse(deliverables)
     reused = sum(1 for did in proj if reuse_map.get(did, 0) > 0)
 
-    balances: Counter[str] = Counter()
     handles = {
         r["pubkey"]: (r.get("handle") or r["pubkey"][-8:])
         for r in pool.latest_per_id(keyring).values()
         if r.get("pubkey")
     }
+    balances: Counter[str] = Counter()
     for c in credits:
-        if c.get("op") in ("mint", "decay", "adjust") and isinstance(c.get("amount"), (int, float)):
-            balances[handles.get(c.get("member"), c.get("member", "?"))] += c["amount"]
+        if c.get("op") in ("mint", "decay", "adjust", "reuse", "royalty") and isinstance(
+            c.get("amount"), (int, float)
+        ):
+            balances[handles.get(c.get("member"), (c.get("member") or "?")[-8:])] += c["amount"]
 
-    print(f"身份      {len(pool.latest_per_id(keyring))} 个")
+    unused = sorted(
+        k
+        for k, v in proj.items()
+        if (v.get("review") or {}).get("result") == "pass" and reuse_map.get(k, 0) == 0
+    )
+
+    return {
+        "identities": len(pool.latest_per_id(keyring)),
+        "requests": dict(sorted(counts.items())),
+        "requests_total": len(pool.project(requests)),
+        "deliverables": {
+            "total": len(proj),
+            "review_pass": reviewed,
+            "review_fail": failed,
+            "awaiting_review": len(proj) - reviewed - failed,
+            "reused": reused,
+            "reuse_detail": dict(sorted(reuse_map.items())),
+        },
+        "credit": {k: round(v, 4) for k, v in balances.most_common()},
+        "unused_accepted": unused,
+    }
+
+
+def main() -> int:
+    import argparse as _ap
+    import json as _json
+
+    ap = _ap.ArgumentParser(description="一眼看清池子现状")
+    ap.add_argument("--json", action="store_true", help="输出 JSON（给机器读）")
+    args = ap.parse_args()
+
+    s = collect()
+    if args.json:
+        print(_json.dumps(s, ensure_ascii=False, sort_keys=True, indent=2))
+        return 0
+
+    d = ROOT / "data"
+    counts = Counter(s["requests"])
+    reviewed = s["deliverables"]["review_pass"]
+    failed = s["deliverables"]["review_fail"]
+    pending = s["deliverables"]["awaiting_review"]
+    reused = s["deliverables"]["reused"]
+    reuse_map = s["deliverables"]["reuse_detail"]
+    balances = Counter(s["credit"])
+
+    print(f"身份      {s['identities']} 个")
     print(
         "单子      "
         + (
@@ -49,9 +95,10 @@ def main() -> int:
             if counts
             else "（还没有单子）"
         )
+        + f"   累计 {s['requests_total']}"
     )
     print(
-        f"交付物    {len(proj)} 件"
+        f"交付物    {s['deliverables']['total']} 件"
         f"（{reviewed} 通过 / {failed} 打回 / {pending} 待复核）"
         f"  其中 {reused} 件被引用过"
         + (
@@ -67,12 +114,7 @@ def main() -> int:
 
     # ★ 最有价值的一条提示：通过了但没人用
     if reviewed:
-        unused = [
-            k
-            for k, v in proj.items()
-            if (v.get("review") or {}).get("result") == "pass"
-            and reuse_map.get(k, 0) == 0
-        ]
+        unused = s["unused_accepted"]
         if unused:
             print()
             print(f"★ 通过了但没人用（{len(unused)} 件）：{', '.join(sorted(unused))}")
