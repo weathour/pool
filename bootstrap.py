@@ -124,6 +124,13 @@ def main() -> int:
             run(["git", "config", k, v])
         print("  已打开 fsckObjects（碰撞检测）")
 
+        # 钩子目录：.githooks/pre-push 负责把提交镜像到 GitHub。
+        # ★ 必须同时建目录并设 core.hooksPath —— 目录不存在时
+        #   git 会把钩子静默跳过（不报错，你以为它在跑）。
+        (ROOT / ".githooks").mkdir(exist_ok=True)
+        run(["git", "config", "core.hooksPath", ".githooks"])
+        print("  已设 core.hooksPath = .githooks")
+
         # .gitignore
         gi = ROOT / ".gitignore"
         if not gi.exists():

@@ -199,6 +199,46 @@ def check_allowed_signers(f: Findings) -> None:
         f.error(".allowed_signers", "里面没有可用的公钥")
 
 
+def check_git_hooks(f: Findings) -> None:
+    """core.hooksPath 指向的目录必须存在，且里面的钩子名必须是 git 真认的。"""
+    import subprocess
+
+    try:
+        hp = subprocess.check_output(
+            ["git", "config", "--get", "core.hooksPath"], cwd=ROOT, text=True
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        f.warn("git", "没有设 core.hooksPath —— 镜像钩子不会生效")
+        return
+    if not hp:
+        f.warn("git", "core.hooksPath 是空的")
+        return
+    d = ROOT / hp
+    if not d.is_dir():
+        f.error("git", f"core.hooksPath 指向不存在的目录：{hp}")
+        return
+    # git 实际支持的钩子名（客户端）
+    valid = {
+        "applypatch-msg", "pre-applypatch", "post-applypatch", "pre-commit",
+        "pre-merge-commit", "prepare-commit-msg", "commit-msg", "post-commit",
+        "pre-rebase", "post-checkout", "post-merge", "pre-push",
+        "pre-receive", "update", "proc-receive", "post-receive", "post-update",
+        "reference-transaction", "push-to-checkout", "pre-auto-gc",
+        "post-rewrite", "sendemail-validate", "fsmonitor-watchman",
+        "p4-changelist", "p4-prepare-changelist", "p4-post-changelist",
+        "p4-pre-submit", "post-index-change",
+    }
+    for hook in sorted(d.iterdir()):
+        if hook.name.startswith(".") or hook.name.endswith(".sample"):
+            continue
+        if hook.name not in valid:
+            f.error(
+                "git",
+                f"{hp}/{hook.name} 不是 git 支持的钩子名 —— "
+                "它永远不会被调用（最容易踩的是 post-push：git 没有这个钩子）",
+            )
+
+
 def check_templates(f: Findings) -> None:
     """issue / PR 模板要放在两个地方（Gitea 读 .gitea，GitHub 读 .github）。"""
     for base in (".gitea", ".github"):
@@ -225,6 +265,7 @@ def main() -> int:
     check_data_files(f)
     check_docs_index(f)
     check_allowed_signers(f)
+    check_git_hooks(f)
     check_templates(f)
 
     f.dump(args.quiet, args.json)

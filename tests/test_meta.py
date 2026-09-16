@@ -57,8 +57,15 @@ def make_repo() -> Path:
         ".allowed_signers",
         ".gitea",
         ".github",
+        ".githooks",
     ]
     tmp.mkdir(parents=True, exist_ok=True)
+    # 初始化 git 并指到 .githooks —— 和真仓库一致，
+    # 否则 core.hooksPath 检查会误报"没设"
+    subprocess.run(["git", "init", "-q"], cwd=tmp, capture_output=True)
+    subprocess.run(
+        ["git", "config", "core.hooksPath", ".githooks"], cwd=tmp, capture_output=True
+    )
     for name in keep:
         src = ROOT / name
         if not src.exists():
@@ -169,6 +176,22 @@ try:
     res = run_meta(repo)
     check("被抓住", res.returncode != 0, res.stdout)
     check("指出是哪个文件", "credits.jsonl" in res.stdout, res.stdout)
+finally:
+    shutil.rmtree(repo, ignore_errors=True)
+
+section("core.hooksPath 里放了 git 不认的钩子名")
+repo = make_repo()
+try:
+    import subprocess as sp
+    sp.run(["git", "init", "-q"], cwd=repo, capture_output=True)
+    sp.run(["git", "config", "core.hooksPath", ".githooks"], cwd=repo, capture_output=True)
+    (repo / ".githooks").mkdir(exist_ok=True)
+    bad = repo / ".githooks" / "post-push"   # ★ git 没有这个钩子
+    bad.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    bad.chmod(0o755)
+    res = run_meta(repo)
+    check("被抓住", res.returncode != 0, res.stdout)
+    check("指出是 post-push", "post-push" in res.stdout, res.stdout)
 finally:
     shutil.rmtree(repo, ignore_errors=True)
 
