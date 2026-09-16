@@ -1,0 +1,29 @@
+name: 校验
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖
+        run: pip install cryptography
+
+      - name: 校验账本
+        run: python3 tools/validate
+
+      - name: 单元测试
+        run: python3 tests/test_units.py
+
+      - name: 检查站点能否生成
+        run: python3 tools/build-site --out /tmp/site

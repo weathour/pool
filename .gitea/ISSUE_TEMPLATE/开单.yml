@@ -1,0 +1,66 @@
+name: 开一张单
+description: 说清你需要一个还不存在的什么产物
+title: "[开单] "
+labels: ["request"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        开单只是"我需要什么"的声明，**不需要任何人批准**。
+        唯一不能省的是**怎么算做完了**——整套记账的可信度全压在这一点上。
+  - type: dropdown
+    id: type
+    attributes:
+      label: 类型
+      options:
+        - need（我需要什么）
+        - offer（我想做什么，缺人手）
+        - challenge（已有产物是错的）
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: 产物形态
+      options:
+        - knowledge_pack（带证据链的结论）
+        - answer（回答，可以很短）
+        - tool（能跑的代码）
+        - curation（整理、校对、补锚点）
+        - translation（跨语言对照）
+        - question（一个好问题）
+    validations:
+      required: true
+  - type: input
+    id: title
+    attributes:
+      label: 一句话说清缺什么
+    validations:
+      required: true
+  - type: textarea
+    id: spec
+    attributes:
+      label: 产物长什么样
+      description: 形态、范围、精度要求
+      placeholder: |
+        形态：一条带锚点的结论
+        范围：只覆盖庶政学预备工作(1)-(4)
+        精度：锚点必须精确到文件与行号
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 怎么算做完了
+      description: |
+        ★ 必须可判定。判断方法：把这句话给一个不认识你的人，
+        他能不能只靠它决定"这东西算不算做完了"。
+        写不出来，说明这张单还不该开。
+      placeholder: 包含至少 2 条可核查的锚点（格式 path:行号），且写明了什么证据会推翻它
+    validations:
+      required: true
+  - type: input
+    id: links
+    attributes:
+      label: 关联
+      description: 关联的板块 / 主题 / 已有产物 id（challenge 类型必填）

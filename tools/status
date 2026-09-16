@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""一眼看清池子现状。"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "lib"))
+
+import pool  # noqa: E402
+from collections import Counter  # noqa: E402
+
+
+def main() -> int:
+    d = ROOT / "data"
+    requests = pool.read_jsonl(d / "requests.jsonl")
+    deliverables = pool.read_jsonl(d / "deliverables.jsonl")
+    credits = pool.read_jsonl(d / "credits.jsonl")
+    keyring = pool.read_jsonl(d / "keyring.jsonl")
+
+    status = pool.request_status(requests)
+    counts = Counter(status.values())
+    proj = pool.project(deliverables)
+
+    reviewed = sum(1 for v in proj.values() if (v.get("review") or {}).get("result") == "pass")
+    failed = sum(1 for v in proj.values() if (v.get("review") or {}).get("result") == "fail")
+    pending = len(proj) - reviewed - failed
+    reused = sum(1 for v in proj.values() if (v.get("reuse_count") or 0) > 0)
+
+    balances: Counter[str] = Counter()
+    handles = {
+        r["pubkey"]: (r.get("handle") or r["pubkey"][-8:])
+        for r in pool.latest_per_id(keyring).values()
+        if r.get("pubkey")
+    }
+    for c in credits:
+        if c.get("op") in ("mint", "decay", "adjust") and isinstance(c.get("amount"), (int, float)):
+            balances[handles.get(c.get("member"), c.get("member", "?"))] += c["amount"]
+
+    print(f"身份      {len(pool.latest_per_id(keyring))} 个")
+    print(
+        "单子      "
+        + (
+            "  ".join(f"{k}={v}" for k, v in sorted(counts.items()))
+            if counts
+            else "（还没有单子）"
+        )
+    )
+    print(
+        f"交付物    {len(proj)} 件"
+        f"（{reviewed} 通过 / {failed} 打回 / {pending} 待复核）"
+        f"  其中 {reused} 件被引用过"
+    )
+    if balances:
+        print("credit    " + "  ".join(f"{k}={v:g}" for k, v in balances.most_common()))
+    else:
+        print("credit    （还没有入账）")
+
+    # ★ 最有价值的一条提示：通过了但没人用
+    if reviewed:
+        unused = [
+            k
+            for k, v in proj.items()
+            if (v.get("review") or {}).get("result") == "pass" and not (v.get("reuse_count") or 0)
+        ]
+        if unused:
+            print()
+            print(f"★ 通过了但没人用（{len(unused)} 件）：{', '.join(sorted(unused))}")
+            print("  它们都有第二人复核，但没有任何产物引用。")
+            print("  要么是我们需要的东西和别人不一样，要么是它们没被看见。")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

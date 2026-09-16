@@ -1,0 +1,360 @@
+#!/usr/bin/env python3
+"""生成公开展示站 —— 输出到 site/。
+
+设计原则：**单文件、零依赖、纯静态。**
+  - 没有 CDN、没有框架、没有网络请求 —— 页面自己就是完整的
+  - 数据内嵌在页面里，所以打开就能看，不需要任何后端
+  - 任何人都能把这个 HTML 存下来，它仍然是完整的
+
+它展示：
+  1. 公告板（开着的单、在等的复核）
+  2. 最近的交付物
+  3. credit 榜（含"谁为谁背书"的关系）
+  4. 验证方式（让别人能自己核对整份账）
+
+用法：
+    python3 tools/build-site            # 生成 site/
+    python3 tools/build-site --out X    # 输出到 X
+"""
+
+from __future__ import annotations
+
+import argparse
+import html
+import json
+import sys
+from collections import defaultdict
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "lib"))
+
+import pool  # noqa: E402
+
+# ---------------------------------------------------------------- 数据整理
+
+
+def load() -> dict:
+    data = {}
+    for name in pool.DATA_FILES:
+        data[name] = pool.read_jsonl(ROOT / "data" / f"{name}.jsonl")
+    return data
+
+
+def build_view(data: dict) -> dict:
+    keyring = data["keyring"]
+    handle_of = {}
+    for rec in keyring:
+        if rec.get("pubkey"):
+            handle_of[rec["pubkey"]] = rec.get("handle") or rec["pubkey"][-8:]
+
+    def h(pub: str | None) -> str:
+        if not pub:
+            return "—"
+        return handle_of.get(pub, pub[-8:] + "…")
+
+    # ---- 申请单
+    req_status = pool.request_status(data["requests"])
+    req_latest = pool.project(data["requests"])
+    requests = []
+    for rid, rec in sorted(req_latest.items()):
+        requests.append(
+            {
+                "id": rid,
+                "title": rec.get("title", ""),
+                "type": rec.get("type", ""),
+                "kind": rec.get("artifact_kind", ""),
+                "spec": rec.get("spec", ""),
+                "acceptance": rec.get("acceptance", ""),
+                "links": rec.get("links", []),
+                "status": req_status.get(rid, "?"),
+                "by": h(rec.get("by")),
+                "at": rec.get("at", "")[:10],
+            }
+        )
+
+    # ---- 交付物
+    deliv_latest = pool.project(data["deliverables"])
+    # 只保留真正被 create 过的（project 出来的每条都有 last_op）
+    creates = {
+        k: v
+        for k, v in deliv_latest.items()
+        if v.get("request_id") and v.get("deliverer")
+    }
+    deliverables = []
+    for did, rec in sorted(creates.items()):
+        review = rec.get("review") or {}
+        base = review.get("reproduce_minutes") or rec.get("reproduce_minutes")
+        deliverables.append(
+            {
+                "id": did,
+                "request_id": rec.get("request_id", ""),
+                "kind": rec.get("artifact_kind", ""),
+                "deliverer": h(rec.get("deliverer")),
+                "reviewer": h(review.get("by")) if review else None,
+                "result": review.get("result") if review else None,
+                "reason": review.get("reason") if review else None,
+                "minutes": base,
+                "credit": round(base / 10, 1) if isinstance(base, (int, float)) else None,
+                "reuse": rec.get("reuse_count", 0),
+                "at": rec.get("at", "")[:10],
+            }
+        )
+
+    # ---- 账本与背书关系
+    credits = data["credits"]
+    balances: dict[str, float] = defaultdict(float)
+    for c in credits:
+        if c.get("op") in ("mint", "decay", "adjust") and isinstance(c.get("amount"), (int, float)):
+            balances[h(c.get("member"))] += c["amount"]
+
+    endorsements = [
+        {"reviewer": d["reviewer"], "deliverer": d["deliverer"], "id": d["id"]}
+        for d in deliverables
+        if d["reviewer"] and d["result"] == "pass"
+    ]
+
+    return {
+        "handles": sorted(set(handle_of.values())),
+        "members": sorted(handle_of.values()),
+        "requests": requests,
+        "deliverables": deliverables,
+        "balances": dict(balances),
+        "endorsements": endorsements,
+        "chain_heads": {
+            name: (data[name][-1]["hash"] if data[name] else None)
+            for name in pool.DATA_FILES
+        },
+        "counts": {
+            "open": sum(1 for r in requests if r["status"] == "open"),
+            "claimed": sum(1 for r in requests if r["status"] == "claimed"),
+            "delivered": sum(1 for r in requests if r["status"] == "delivered"),
+            "accepted": sum(1 for r in requests if r["status"] == "accepted"),
+            "deliverables": len(deliverables),
+            "reused": sum(1 for d in deliverables if d["reuse"] > 0),
+        },
+    }
+
+
+# ---------------------------------------------------------------- 渲染
+
+PAGE = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>池子</title>
+<style>
+  :root {{
+    --bg: #0f1115; --fg: #e6e6e6; --dim: #8a8f98; --line: #23272e;
+    --accent: #7aa2f7; --ok: #9ece6a; --warn: #e0af68; --err: #f7768e;
+    --card: #16191f;
+  }}
+  @media (prefers-color-scheme: light) {{
+    :root {{
+      --bg: #fbfbfa; --fg: #1c1e21; --dim: #6b7280; --line: #e5e7eb;
+      --accent: #2f5fd0; --ok: #3f7a1f; --warn: #9a6700; --err: #b4232f;
+      --card: #ffffff;
+    }}
+  }}
+  * {{ box-sizing: border-box; }}
+  body {{
+    margin: 0; padding: 2rem 1.25rem 6rem;
+    background: var(--bg); color: var(--fg);
+    font: 15px/1.7 -apple-system, "Segoe UI", "Noto Sans CJK SC", sans-serif;
+    max-width: 900px; margin-inline: auto;
+  }}
+  h1 {{ font-size: 1.6rem; margin: 0 0 .3rem; letter-spacing: .02em; }}
+  h2 {{ font-size: 1.1rem; margin: 2.5rem 0 .8rem; padding-bottom: .4rem;
+       border-bottom: 1px solid var(--line); }}
+  .sub {{ color: var(--dim); margin: 0 0 2rem; font-size: .92rem; }}
+  .stats {{ display: flex; flex-wrap: wrap; gap: .5rem; margin: 1rem 0 0; }}
+  .stat {{ background: var(--card); border: 1px solid var(--line);
+          border-radius: 8px; padding: .5rem .8rem; font-size: .85rem; }}
+  .stat b {{ font-size: 1.15rem; color: var(--accent); }}
+  .card {{ background: var(--card); border: 1px solid var(--line);
+          border-radius: 10px; padding: .9rem 1.1rem; margin: .6rem 0; }}
+  .card h3 {{ margin: 0 0 .35rem; font-size: 1rem; font-weight: 600; }}
+  .meta {{ color: var(--dim); font-size: .82rem; display: flex;
+          flex-wrap: wrap; gap: .8rem; margin-top: .45rem; }}
+  .tag {{ display: inline-block; font-size: .75rem; padding: .1rem .45rem;
+         border-radius: 4px; border: 1px solid var(--line); color: var(--dim); }}
+  .s-open {{ color: var(--accent); }} .s-claimed {{ color: var(--warn); }}
+  .s-delivered {{ color: var(--warn); }} .s-accepted {{ color: var(--ok); }}
+  .s-closed, .s-withdrawn {{ color: var(--dim); }}
+  .pass {{ color: var(--ok); }} .fail {{ color: var(--err); }}
+  .field {{ margin: .35rem 0; font-size: .88rem; }}
+  .field .k {{ color: var(--dim); }}
+  code {{ background: var(--card); border: 1px solid var(--line);
+         padding: .1rem .35rem; border-radius: 4px; font-size: .85em; }}
+  pre {{ background: var(--card); border: 1px solid var(--line);
+        border-radius: 8px; padding: .8rem 1rem; overflow-x: auto; font-size: .85rem; }}
+  .empty {{ color: var(--dim); font-style: italic; padding: .5rem 0; }}
+  table {{ border-collapse: collapse; width: 100%; font-size: .9rem; }}
+  th, td {{ text-align: left; padding: .45rem .6rem; border-bottom: 1px solid var(--line); }}
+  th {{ color: var(--dim); font-weight: 500; font-size: .82rem; }}
+  .heads {{ font-size: .78rem; color: var(--dim); word-break: break-all; }}
+  a {{ color: var(--accent); }}
+  footer {{ margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--line);
+           color: var(--dim); font-size: .82rem; }}
+</style>
+</head>
+<body>
+
+<h1>池子</h1>
+<p class="sub">一个公告板加一本账。把自己攒下的资料、经验、和处理资料的方法放进一个公共的地方，并且给「想一起做事的人」一个不用互相认识也能对接的入口。</p>
+
+<div class="stats">
+  <div class="stat"><b>{n_open}</b> 张单开着</div>
+  <div class="stat"><b>{n_delivered}</b> 件等复核</div>
+  <div class="stat"><b>{n_accepted}</b> 件已成案</div>
+  <div class="stat"><b>{n_reused}</b> 件被引用过</div>
+  <div class="stat"><b>{n_members}</b> 个身份</div>
+</div>
+
+<h2>公告板</h2>
+<div id="requests"></div>
+
+<h2>交付物</h2>
+<div id="deliverables"></div>
+
+<h2>credit</h2>
+<div id="credits"></div>
+
+<h2>怎么验证这个仓库</h2>
+<p>数据是四份纯文本文件，一行一条 JSON。任何人 clone 之后跑一条命令就能验证整份账：</p>
+<pre>python3 tools/validate</pre>
+<p>它会检查三件事：链是否完整（有没有被插入删改）、签名是否有效（是谁写的）、复核者是否与交付者不同（有没有自己批自己）。</p>
+<p><b>数据就在页面里。</b> 打开浏览器控制台，输入 <code>POOL</code> 就能拿到这份页面的全部原始数据——页面是自包含的，存下来仍然是完整的。</p>
+<p class="heads"><b>当期链尾：</b><br>{heads}</p>
+
+<footer>
+  本页由 <code>tools/build-site</code> 从 <code>data/*.jsonl</code> 生成。<br>
+  内容 CC BY-SA 4.0 · 代码 MIT · 签名与哈希链只保证记录完整性与归属，不担保内容真实性。
+</footer>
+
+<script>
+const POOL = {payload};
+
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}}[c]));
+
+function field(k, v) {{
+  if (!v) return '';
+  return `<div class="field"><span class="k">${{esc(k)}}：</span>${{esc(v)}}</div>`;
+}}
+
+// ---- 公告板
+(function () {{
+  const el = document.getElementById('requests');
+  const order = {{open:0, claimed:1, delivered:2, accepted:3, closed:8, withdrawn:9}};
+  const rs = [...POOL.requests].sort((a,b) => (order[a.status]??5) - (order[b.status]??5));
+  if (!rs.length) {{ el.innerHTML = '<p class="empty">还没有单子。开第一张吧。</p>'; return; }}
+  el.innerHTML = rs.map(r => `
+    <div class="card">
+      <h3>${{esc(r.title)}} <span class="tag">${{esc(r.kind)}}</span>
+        <span class="tag s-${{esc(r.status)}}">${{esc(r.status)}}</span></h3>
+      ${{field('要什么', r.spec)}}
+      ${{field('怎么算做完了', r.acceptance)}}
+      <div class="meta"><span>${{esc(r.id)}}</span><span>由 ${{esc(r.by)}}</span>
+        <span>${{esc(r.at)}}</span></div>
+    </div>`).join('');
+}})();
+
+// ---- 交付物
+(function () {{
+  const el = document.getElementById('deliverables');
+  if (!POOL.deliverables.length) {{
+    el.innerHTML = '<p class="empty">还没有交付物。</p>'; return;
+  }}
+  el.innerHTML = POOL.deliverables.map(d => `
+    <div class="card">
+      <h3>${{esc(d.id)}} <span class="tag">${{esc(d.kind)}}</span>
+        ${{d.result ? `<span class="tag ${{d.result}}">${{d.result}}</span>`
+                    : '<span class="tag">等复核</span>'}}</h3>
+      <div class="meta">
+        <span>交付 ${{esc(d.deliverer)}}</span>
+        ${{d.reviewer ? `<span>复核 ${{esc(d.reviewer)}}</span>` : ''}}
+        ${{d.credit !== null ? `<span>估值 ${{d.credit}} credit</span>` : ''}}
+        <span>被引用 ${{d.reuse}} 次</span>
+        <span>对应 ${{esc(d.request_id)}}</span>
+      </div>
+      ${{field('复核理由', d.reason)}}
+    </div>`).join('');
+}})();
+
+// ---- credit
+(function () {{
+  const el = document.getElementById('credits');
+  const bal = Object.entries(POOL.balances).sort((a,b) => b[1]-a[1]);
+  let html = '';
+  if (bal.length) {{
+    html += '<table><tr><th>身份</th><th>credit</th></tr>' +
+      bal.map(([k,v]) => `<tr><td>${{esc(k)}}</td><td>${{v.toFixed(1)}}</td></tr>`).join('') +
+      '</table>';
+  }} else {{
+    html += '<p class="empty">还没有入账。credit 在交付物通过复核并被确认之后才产生。</p>';
+  }}
+  if (POOL.endorsements.length) {{
+    html += '<h2 style="font-size:1rem">谁为谁背书过</h2>';
+    html += '<table><tr><th>复核者</th><th>为谁背书</th><th>交付物</th></tr>' +
+      POOL.endorsements.map(e =>
+        `<tr><td>${{esc(e.reviewer)}}</td><td>${{esc(e.deliverer)}}</td><td>${{esc(e.id)}}</td></tr>`
+      ).join('') + '</table>';
+    html += '<p class="sub" style="margin-top:.8rem">credit 不是一个分数，是一份由三个人联署的认可记录：' +
+            '交付的人、复核的人、用的人，各签一句。所以「谁为谁背书」比「谁分高」更值得看。</p>';
+  }}
+  el.innerHTML = html;
+}})();
+</script>
+</body>
+</html>
+"""
+
+
+def render(view: dict) -> str:
+    heads = "<br>".join(
+        f"{name}: {h}" if h else f"{name}: （空）"
+        for name, h in view["chain_heads"].items()
+    )
+    return PAGE.format(
+        n_open=view["counts"]["open"],
+        n_delivered=view["counts"]["delivered"],
+        n_accepted=view["counts"]["accepted"],
+        n_reused=view["counts"]["reused"],
+        n_members=len(view["members"]),
+        heads=html.escape(heads),
+        payload=json.dumps(view, ensure_ascii=False, sort_keys=True),
+    )
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="生成展示站")
+    ap.add_argument("--out", default=str(ROOT / "site"))
+    args = ap.parse_args()
+
+    data = load()
+    view = build_view(data)
+    page = render(view)
+
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "index.html").write_text(page, encoding="utf-8")
+
+    # Cloudflare Pages 用得到
+    (out / "_headers").write_text(
+        "/*\n  X-Content-Type-Options: nosniff\n  Referrer-Policy: no-referrer\n",
+        encoding="utf-8",
+    )
+
+    size = (out / "index.html").stat().st_size
+    c = view["counts"]
+    print(f"✓ 已生成 {out/'index.html'}（{size/1024:.1f} KB）")
+    print(
+        f"  单 {c['open']} 开着 / {c['delivered']} 等复核 / {c['accepted']} 成案"
+        f" · 交付物 {c['deliverables']} 件（{c['reused']} 件被引用）"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,509 @@
+#!/usr/bin/env python3
+"""池子签名工具 —— 新人唯一的门槛。
+
+目标：装好密钥、开出第一张单，不超过 5 分钟。
+
+用法：
+    python3 tools/sign init --handle 你的名字
+    python3 tools/sign whoami
+    python3 tools/sign req --kind answer --title "..." --spec "..." --acceptance "..."
+    python3 tools/sign claim r-0001
+    python3 tools/sign deliver --request r-0001 --kind answer --content-file 内容.json
+    python3 tools/sign review d-0001 --result pass --reason "..." --reproduce-minutes 30
+    python3 tools/sign confirm r-0001
+    python3 tools/sign check          # 提交前自查，不用等 CI
+
+handle 的来源（按优先级）：
+    --handle 参数  >  环境变量 POOL_HANDLE  >  ~/.pool/handle
+
+私钥位置：~/.pool/keys/<handle>.key  （权限 600，绝不在仓库里）
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "lib"))
+
+import pool  # noqa: E402
+
+# ★ 环境变量在子 shell / 工具链里常常丢失，所以支持仓库根目录的 .env 兜底。
+#   真踩过这个坑：POOL_KEYDIR 没传进去，deliver 用了默认目录里的另一把私钥。
+_ENV_FILE = ROOT / ".env"
+
+
+def _load_env_file() -> None:
+    if not _ENV_FILE.exists():
+        return
+    for raw in _ENV_FILE.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        os.environ.setdefault(k.strip(), v.strip())
+
+
+_load_env_file()
+
+KEYDIR = Path(os.environ.get("POOL_KEYDIR", Path.home() / ".pool" / "keys"))
+HANDLE_FILE = Path(os.environ.get("POOL_HANDLE_FILE", Path.home() / ".pool" / "handle"))
+DATA = ROOT / "data"
+
+
+# ---------------------------------------------------------------- 通用
+
+
+def die(msg: str) -> None:
+    print(f"错误：{msg}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def resolve_handle(explicit: str | None) -> str:
+    if explicit:
+        return explicit
+    env = os.environ.get("POOL_HANDLE")
+    if env:
+        return env
+    if HANDLE_FILE.exists():
+        name = HANDLE_FILE.read_text(encoding="utf-8").strip()
+        if name:
+            return name
+    die(
+        "不知道你是谁。四种办法：\n"
+        "  1) 加 --handle 你的名字（推荐：显式最不容易出错）\n"
+        "  2) export POOL_HANDLE=你的名字\n"
+        "  3) 在仓库根目录放 .env，写 POOL_HANDLE=你的名字\n"
+        "  4) 首次跑 init 时会自动记住"
+    )
+    raise AssertionError("unreachable")
+
+
+def key_path(handle: str) -> Path:
+    return KEYDIR / f"{handle}.key"
+
+
+def load_key(handle: str):
+    path = key_path(handle)
+    if not path.exists():
+        die(f"找不到私钥：{path}\n先跑：python3 tools/sign init --handle {handle}")
+    if path.stat().st_mode & 0o077:
+        die(f"私钥权限太松：{path}\n跑一下：chmod 600 {path}")
+    return pool.load_private(path.read_bytes())
+
+
+# ---------------------------------------------------------------- ID 生成
+
+
+def id_prefix(pubkey: str) -> str:
+    """从公钥派生一个短前缀。
+
+    为什么不用自增序号当身份：不同的人各自生成 r-0001，一合并就撞车。
+    前缀由公钥派生，所以天生不会撞。
+    """
+    raw = pubkey.split(":", 1)[-1]
+    digest = hashlib.sha256(raw.encode("ascii")).hexdigest()
+    return digest[:6]
+
+
+def next_id(kind: str, pubkey: str, existing_ids) -> str:
+    """生成 {kind}-{公钥前缀}-{该人该类的第 N 个}。
+
+    不用全局计数器，因为多人在各自分支上同时开单会让全局计数器冲突。
+    """
+    prefix = f"{kind}-{id_prefix(pubkey)}-"
+    # ★ 去重再计数：同一条交付物的 create 和 review 是两条记录、同一个 id。
+    #   不去重的话，review 之后的下一件交付物会复用同一个编号并把它覆盖掉。
+    #   （真踩过这个坑）
+    used = {i for i in existing_ids if isinstance(i, str) and i.startswith(prefix)}
+    return f"{prefix}{len(used) + 1:04d}"
+
+
+# ---------------------------------------------------------------- 密钥
+
+
+def cmd_init(args) -> int:
+    handle = resolve_handle(args.handle)
+    KEYDIR.mkdir(parents=True, exist_ok=True)
+    path = key_path(handle)
+    if path.exists() and not args.force:
+        die(f"私钥已存在：{path}\n（要覆盖请加 --force，但那会让你旧记录的签名失去意义）")
+
+    key = pool.generate_key()
+    path.write_bytes(pool.private_to_bytes(key))
+    path.chmod(0o600)
+    pub = pool.public_of(key)
+
+    keyring = DATA / "keyring.jsonl"
+    existing = pool.read_jsonl(keyring)
+    if any(r.get("pubkey") == pub for r in existing):
+        die("这把公钥已经在 keyring 里了")
+
+    kid = next_id("k", pub, list(pool.latest_per_id(existing)))
+    body = {
+        "id": kid,
+        "op": "join",
+        "pubkey": pub,
+        "by": pub,
+        "handle": handle,
+        "status": "active",
+    }
+    pool.append_record(keyring, pool.build_record(keyring, body, key))
+
+    HANDLE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    HANDLE_FILE.write_text(handle, encoding="utf-8")
+
+    print(f"✓ 私钥：{path}（权限 600）")
+    print(f"  公钥：{pub}")
+    print(f"  已登记到 data/keyring.jsonl，并记住 handle = {handle}")
+    print()
+    print("★ 立刻备份这个私钥文件。丢了它，你所有记录的签名都无法再代表你。")
+    print("  备份到加密 U 盘或密码管理器 —— 不要放进仓库。")
+    return 0
+
+
+def cmd_whoami(args) -> int:
+    handle = resolve_handle(args.handle)
+    key = load_key(handle)
+    pub = pool.public_of(key)
+    origin = (
+        "--handle 参数"
+        if args.handle
+        else ("POOL_HANDLE 环境变量" if os.environ.get("POOL_HANDLE") else str(HANDLE_FILE))
+    )
+    print(f"handle: {handle}")
+    print(f"pubkey: {pub}")
+    print(f"私钥:   {key_path(handle)}")
+    print(f"来源:   {origin}")
+    ks = {r.get("pubkey"): r.get("handle") for r in pool.read_jsonl(DATA / "keyring.jsonl")}
+    if ks.get(pub) and ks[pub] != handle:
+        print(f"⚠ 注意：这把公钥在 keyring 里登记的名字是「{ks[pub]}」，不是「{handle}」")
+    return 0
+
+
+# ---------------------------------------------------------------- 申请单
+
+
+def cmd_req(args) -> int:
+    handle = resolve_handle(args.handle)
+    key = load_key(handle)
+    path = DATA / "requests.jsonl"
+
+    if not args.acceptance.strip():
+        die("acceptance 不能为空 —— 这是整套记账可信度的唯一支点。")
+
+    pub = pool.public_of(key)
+    rid = next_id("r", pub, [r.get("id") for r in pool.read_jsonl(path)])
+    body = {
+        "id": rid,
+        "op": "open",
+        "type": args.type,
+        "title": args.title,
+        "artifact_kind": args.kind,
+        "spec": args.spec,
+        "acceptance": args.acceptance,
+        "links": args.link or [],
+        "status_declared": "open",
+    }
+    pool.append_record(path, pool.build_record(path, body, key))
+    print(f"✓ 开单 {rid}：{args.title}")
+    print(f"  验收标准：{args.acceptance}")
+    return 0
+
+
+def _request_op(handle: str, rid: str, op: str, extra: dict) -> int:
+    key = load_key(handle)
+    path = DATA / "requests.jsonl"
+    latest = pool.latest_per_id(pool.read_jsonl(path))
+    if rid not in latest:
+        die(f"找不到单子 {rid}")
+    body = {"id": rid, "op": op, **extra}
+    pool.append_record(path, pool.build_record(path, body, key))
+    print(f"✓ {rid} → {op}")
+    return 0
+
+
+def cmd_claim(args) -> int:
+    handle = resolve_handle(args.handle)
+    pub = pool.public_of(load_key(handle))
+    return _request_op(handle, args.id, "claim", {"claimant": pub})
+
+
+def cmd_confirm(args) -> int:
+    handle = resolve_handle(args.handle)
+    pub = pool.public_of(load_key(handle))
+
+    records = pool.read_jsonl(DATA / "requests.jsonl")
+    opener = pool.latest_per_id(records).get(args.id, {}).get("by")
+    if opener is None:
+        die(f"找不到单子 {args.id}")
+
+    delivs = pool.read_jsonl(DATA / "deliverables.jsonl")
+    deliverers = {
+        d.get("deliverer") for d in delivs if d.get("request_id") == args.id
+    }
+    if pub in deliverers and pub != opener:
+        die("交付者不能自己确认自己的交付物 —— 需要开单人确认。")
+
+    return _request_op(handle, args.id, "confirm", {})
+
+
+def cmd_close(args) -> int:
+    handle = resolve_handle(args.handle)
+    return _request_op(handle, args.id, "close", {"reason": args.reason})
+
+
+def cmd_amend(args) -> int:
+    """改一条已落账的记录 —— 方式是在同文件末尾追加一条修正记录。
+
+    ★ 原记录永远保留。这不是防你，是防"事后悄悄改账"这件事本身。
+    """
+    handle = resolve_handle(args.handle)
+    key = load_key(handle)
+    pub = pool.public_of(key)
+
+    if args.file not in pool.DATA_FILES:
+        die(f"文件必须是 {', '.join(pool.DATA_FILES)} 之一")
+
+    path = ROOT / "data" / f"{args.file}.jsonl"
+    records = pool.read_jsonl(path)
+    target = None
+    for rec in records:
+        if rec.get("id") == args.id:
+            target = rec
+    if target is None:
+        die(f"在 {args.file}.jsonl 里找不到 {args.id}")
+    if target.get("void"):
+        die(f"{args.id} 已经被作废过了")
+
+    best = pool.latest_per_id(records).get(args.id, target)
+    body = {
+        "id": args.id,
+        "op": "amend",
+        "supersedes": best.get("hash"),
+        "reason": args.reason,
+    }
+    # 允许只改某几个字段；不改的字段留着由读者取"最后一条有效记录"的并集
+    for pair in args.set or []:
+        if "=" not in pair:
+            die(f"--set 格式应为 key=value，收到 {pair!r}")
+        k, v = pair.split("=", 1)
+        body[k] = v
+
+    pool.append_record(path, pool.build_record(path, body, key))
+    print(f"✓ {args.id} 的修正已追加到 {args.file}.jsonl")
+    print(f"  理由：{args.reason}")
+    print(f"  ★ 原记录仍在（supersedes 指向它）")
+    return 0
+
+
+# ---------------------------------------------------------------- 交付物
+
+
+def cmd_deliver(args) -> int:
+    handle = resolve_handle(args.handle)
+    key = load_key(handle)
+    pub = pool.public_of(key)
+    path = DATA / "deliverables.jsonl"
+
+    # ★ 交付前先确认身份：密钥必须在 keyring 里，并且报出来给用户核对
+    ks = {r.get("pubkey"): r.get("handle") for r in pool.read_jsonl(DATA / "keyring.jsonl")}
+    if pub not in ks:
+        die(
+            f"你手上的密钥（{pub[-16:]}）不在 keyring 里。\n"
+            f"  当前身份：{handle}\n"
+            f"  私钥路径：{key_path(handle)}\n"
+            "  换身份请显式加 --handle，或检查 POOL_KEYDIR 是否指对了目录。"
+        )
+    print(f"  以「{ks[pub]}」的身份交付")
+
+    if args.id:
+        did = args.id
+    else:
+        did = next_id("d", pub, list(pool.latest_per_id(pool.read_jsonl(path))))
+
+    reqs = pool.read_jsonl(DATA / "requests.jsonl")
+    latest_req = pool.latest_per_id(reqs)
+    if args.request not in latest_req:
+        die(f"找不到单子 {args.request}")
+
+    opener = latest_req[args.request].get("by")
+    if opener == pub:
+        print(
+            "⚠ 你自己开的单、自己交付 —— 形式合规，"
+            "但这次不会产生 credit（需要他人复核 + 他人确认）。"
+        )
+
+    content = {}
+    if args.content_file:
+        content = json.loads(Path(args.content_file).read_text(encoding="utf-8"))
+
+    body = {
+        "id": did,
+        "op": "create",
+        "request_id": args.request,
+        "artifact_kind": args.kind,
+        "deliverer": pub,
+        "content": content,
+        "reproduce_minutes": args.reproduce_minutes,
+        "reuse_count": 0,
+    }
+    pool.append_record(path, pool.build_record(path, body, key))
+    print(f"✓ 交付 {did}（对应 {args.request}）")
+    return 0
+
+
+def cmd_review(args) -> int:
+    handle = resolve_handle(args.handle)
+    key = load_key(handle)
+    pub = pool.public_of(key)
+    path = DATA / "deliverables.jsonl"
+
+    target = None
+    for rec in pool.read_jsonl(path):
+        if rec.get("id") == args.id and rec.get("op") == "create":
+            target = rec
+    if target is None:
+        die(f"找不到交付物 {args.id}")
+    if target.get("deliverer") == pub:
+        die("p-003：你不能复核自己交付的东西。找另一个人来。")
+
+    body = {
+        "id": args.id,
+        "op": "review",
+        "request_id": target.get("request_id"),
+        "deliverer": target.get("deliverer"),
+        "artifact_kind": target.get("artifact_kind"),
+        "review": {
+            "by": pub,
+            "result": args.result,
+            "reason": args.reason,
+            "reproduce_minutes": args.reproduce_minutes,
+        },
+    }
+    pool.append_record(path, pool.build_record(path, body, key))
+    print(f"✓ {args.id} 复核结果：{args.result}")
+    if args.reproduce_minutes:
+        print(
+            f"  你估的复现时间 {args.reproduce_minutes} 分钟 "
+            f"→ {args.reproduce_minutes / 10:.1f} credit"
+        )
+    return 0
+
+
+# ---------------------------------------------------------------- 自查
+
+
+def cmd_check(args) -> int:
+    return subprocess.call([sys.executable, str(ROOT / "tools" / "validate")])
+
+
+def cmd_genesis_note(args) -> int:
+    """打印 genesis 提交的哈希，用于贴到 README。"""
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-list", "--max-parents=0", "HEAD"],
+            cwd=ROOT,
+            text=True,
+        ).strip()
+    except subprocess.CalledProcessError:
+        die("还没提交过任何东西")
+    print(f"genesis commit: {out}")
+    return 0
+
+
+# ---------------------------------------------------------------- main
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="pool sign", description="池子签名工具")
+    ap.add_argument("--handle", default=None, help="覆盖 handle（默认读 ~/.pool/handle）")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("init", help="生成密钥并登记到 keyring")
+    p.add_argument("--force", action="store_true")
+    p.set_defaults(func=cmd_init)
+
+    sub.add_parser("whoami", help="显示自己的公钥").set_defaults(func=cmd_whoami)
+
+    p = sub.add_parser("req", help="开一张单")
+    p.add_argument("--type", default="need", choices=["need", "offer", "challenge"])
+    p.add_argument("--kind", required=True, help="产物形态：knowledge_pack/answer/tool/curation/translation/question")
+    p.add_argument("--title", required=True)
+    p.add_argument("--spec", required=True)
+    p.add_argument("--acceptance", required=True, help="怎么算做完了（必须可判定）")
+    p.add_argument("--link", action="append", help="关联的板块/主题/已有产物 id")
+    p.set_defaults(func=cmd_req)
+
+    p = sub.add_parser("claim", help="接单")
+    p.add_argument("id")
+    p.set_defaults(func=cmd_claim)
+
+    p = sub.add_parser("deliver", help="交付")
+    p.add_argument("--id", default=None)
+    p.add_argument("--request", required=True)
+    p.add_argument("--kind", required=True)
+    p.add_argument("--content-file", default=None, help="产物内容的 JSON 文件")
+    p.add_argument("--reproduce-minutes", type=int, default=None,
+                   help="你自己估的工时（仅供参考，定价权在复核者）")
+    p.set_defaults(func=cmd_deliver)
+
+    p = sub.add_parser("review", help="复核（不能复核自己的）")
+    p.add_argument("id")
+    p.add_argument("--result", required=True, choices=["pass", "fail"])
+    p.add_argument("--reason", required=True)
+    p.add_argument("--reproduce-minutes", type=int, default=None,
+                   help="★ 你估计别人从零做这个要多少分钟 —— 定价权在你手里")
+    p.set_defaults(func=cmd_review)
+
+    p = sub.add_parser("confirm", help="开单人确认可用")
+    p.add_argument("id")
+    p.set_defaults(func=cmd_confirm)
+
+    p = sub.add_parser("close", help="关单（含决定不做）")
+    p.add_argument("id")
+    p.add_argument("--reason", required=True)
+    p.set_defaults(func=cmd_close)
+
+    p = sub.add_parser("amend", help="修正一条已落账的记录（追加，不覆盖）")
+    p.add_argument("file", help="requests / deliverables / credits / keyring")
+    p.add_argument("id", help="要修正的记录 id")
+    p.add_argument("--reason", required=True)
+    p.add_argument("--set", action="append", metavar="K=V",
+                   help="要改的字段，可重复")
+    p.set_defaults(func=cmd_amend)
+
+    sub.add_parser("check", help="提交前自查").set_defaults(func=cmd_check)
+    sub.add_parser("genesis-note", help="打印 genesis 提交哈希").set_defaults(
+        func=cmd_genesis_note
+    )
+
+    # 让 --handle 在任何位置都能用（放在子命令前后都认）。
+    #
+    # ★ 这里必须用 SUPPRESS 而不是 default=None：
+    #   argparse 会用子解析器的 default 覆盖全局值，所以 default=None
+    #   会把 `--handle X init` 这种写法里的 X 悄悄抹掉，退回到
+    #   ~/.pool/handle —— 那会导致用错身份签名（真的踩过这个坑）。
+    #   用 SUPPRESS 则只有在子命令后真的给了 --handle 时才写进 namespace。
+    for parser in sub.choices.values():
+        parser.add_argument("--handle", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+
+    args = ap.parse_args()
+    # 全局 --handle 被子解析器遮蔽时，补回来
+    if not getattr(args, "handle", None):
+        args.handle = ap.get_default("handle")
+
+    # 记录哪个 handle 是显式指定的，resolve_handle 需要它来决定
+    # 是"必须已存在"（日常操作）还是"可以新建"（init）
+    args._explicit_handle = bool(args.handle)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

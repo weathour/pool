@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""链尾对齐工具 —— 多人同时追加后修复 seq / prev。
+
+什么时候需要它：
+
+  A 和 B 同时基于同一条链尾追加记录。合并之后，后到的那条
+  prev 指向的是旧链尾，于是校验器报 p-001。
+
+  这时把它（以及它之后的所有记录）重算 seq 和 prev 就行。
+  ★ 记录内容不动，所以 hash 也不变 —— 真正要改的只有 seq 和 prev 两个字段。
+
+用法：
+    python3 tools/fixlinks                # 检查，只报告
+    python3 tools/fixlinks --write        # 修复并重跑校验
+
+注意：本工具只能处理"同一份文件内的错位"。
+      如果两条记录的【内容】冲突（比如两人都改了同一条），那要人来判断。
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "lib"))
+
+import pool  # noqa: E402
+
+
+def fix_file(path: Path, write: bool) -> list[str]:
+    """返回被修复条目的描述。"""
+    records = pool.read_jsonl(path)
+    if not records:
+        return []
+
+    fixed: list[str] = []
+    out = []
+    for idx, rec in enumerate(records, 1):
+        want_prev = out[-1]["hash"] if out else None
+        changed = []
+        if rec.get("seq") != idx:
+            changed.append(f"seq {rec.get('seq')}→{idx}")
+            rec["seq"] = idx
+        if rec.get("prev") != want_prev:
+            changed.append("prev 重链")
+            rec["prev"] = want_prev
+        if changed:
+            fixed.append(f"{path.name}:{idx}  {'、'.join(changed)}")
+        out.append(rec)
+
+    if fixed and write:
+        pool.write_jsonl(path, out)
+    return fixed
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="链尾对齐工具")
+    ap.add_argument("--write", action="store_true", help="实际写回（默认只报告）")
+    args = ap.parse_args()
+
+    total: list[str] = []
+    for name in pool.DATA_FILES:
+        path = ROOT / "data" / f"{name}.jsonl"
+        if path.exists():
+            total.extend(fix_file(path, args.write))
+
+    if not total:
+        print("✓ 六份文件的链都是对的，不需要修复")
+        return 0
+
+    for line in total:
+        print(("已修复  " if args.write else "需要修复  ") + line)
+
+    if not args.write:
+        print()
+        print(f"共 {len(total)} 条需要修复。加 --write 执行。")
+        return 1
+
+    print()
+    print(f"✓ 已修复 {len(total)} 条。下面重跑校验：")
+    import subprocess
+
+    return subprocess.call([sys.executable, str(ROOT / "tools" / "validate")])
+
+
+if __name__ == "__main__":
+    sys.exit(main())

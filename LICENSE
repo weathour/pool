@@ -1,0 +1,55 @@
+# 许可
+
+## 内容与数据
+
+本仓库的全部内容——包括 `data/` 下的记录、`policies.jsonl`、以及所有文档——采用
+**Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0)** 许可。
+
+你可以自由地：
+
+- **共享** —— 以任何媒介或格式复制、发行本作品
+- **演绎** —— 修改、转换或以本作品为基础进行创作，用于任何目的（包括商业目的）
+
+但须遵守以下条件：
+
+- **署名** —— 必须给出适当的署名，提供指向本许可的链接，并说明是否作出了修改
+- **相同方式共享** —— 若你修改、转换或以本作品为基础进行创作，必须基于与本作品相同的许可分发你的贡献
+
+完整许可文本：https://creativecommons.org/licenses/by-sa/4.0/legalcode
+
+## 工具代码
+
+`tools/` 与 `lib/` 下的代码采用 **MIT License**。
+
+```
+Copyright (c) 2026 贾苇索 (JiaWeathour) 及贡献者
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+## 为什么分开
+
+**内容用 ShareAlike，是为了让衍生的池子也保持开放**——这样"镜像和分叉"不会变成"圈起来"。
+
+**代码用 MIT，是为了让人能随便拿去用**——工具越容易被用，这套方法传播得越快。
+
+## 一个说明
+
+签名与哈希链只保证**记录的完整性**（没被改过）与**归属**（是谁写的），
+不构成对记录内容真实性的担保，也不构成任何形式的专业意见。

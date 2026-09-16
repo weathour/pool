@@ -1,0 +1,25 @@
+# CODEOWNERS
+#
+# ⚠️ 这份文件是从 MAINTAINERS.md 生成的，仅为审批路由的便捷机制。
+#    它绑定平台（GitHub / Gitea 的用户名），换平台时重新生成即可。
+#    ★ 权威永远在 MAINTAINERS.md 与 data/keyring.jsonl。
+#
+# 语法：<路径模式>  <平台用户名...>
+# 最后一个匹配的模式生效。
+
+# 默认：任何改动都需要维护者过目
+*                                   @JiaWeathour
+
+# 数据：常规记录由维护者合并即可
+/data/requests.jsonl                @JiaWeathour
+/data/deliverables.jsonl            @JiaWeathour
+/data/keyring.jsonl                 @JiaWeathour
+
+# ★ 账本与规则：需要两名维护者同意
+#   （这是"维护者不能单独改账"和"不能自己放宽检查"的平台强制手段）
+/data/credits.jsonl                 @JiaWeathour
+/policies.jsonl                     @JiaWeathour
+/tools/validate                     @JiaWeathour
+
+# 说明：目前只有一名维护者，所以上面的"两名"暂时退化为一人。
+#       加入第二名维护者后，这些行需要列出两个人。

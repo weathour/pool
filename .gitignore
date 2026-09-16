@@ -1,0 +1,18 @@
+# 私钥永远不进仓库
+*.key
+.pool/
+.keys/
+
+# 本地身份与配置（每台机器不同）
+.env
+.poolhandle
+.poolkeys/
+
+# 站点构建产物（由 Cloudflare Pages 在构建时生成）
+site/*
+!site/_headers
+
+# Python
+__pycache__/
+*.pyc
+.venv/

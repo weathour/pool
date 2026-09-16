@@ -1,0 +1,236 @@
+#!/usr/bin/env python3
+"""池子校验器 —— 唯一发号施令的地方。
+
+铁律：不得为了让校验通过而削弱校验。卡住了只能改事实，不能改检查。
+
+v1 实现三条规则：
+  p-001  每条记录的 prev 必须等于本文件上一条的 hash
+  p-002  每条记录签名有效；by 指向的公钥必须已登记且未退役
+  p-003  一条交付物的复核者不得是交付者本人
+
+用法：
+    python3 tools/validate            # 校验全部
+    python3 tools/validate --quiet    # 只在有问题时输出
+退出码：0 通过 / 1 有问题 / 2 用法或环境错误
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "lib"))
+
+import pool  # noqa: E402
+
+# ---------------------------------------------------------------- 输出
+
+
+class Report:
+    def __init__(self) -> None:
+        self.items: list[tuple[str, str, str, str]] = []  # (level, rule, loc, msg)
+
+    def error(self, rule: str, loc: str, msg: str) -> None:
+        self.items.append(("ERROR", rule, loc, msg))
+
+    def warn(self, rule: str, loc: str, msg: str) -> None:
+        self.items.append(("WARN", rule, loc, msg))
+
+    @property
+    def errors(self) -> int:
+        return sum(1 for i in self.items if i[0] == "ERROR")
+
+    @property
+    def warns(self) -> int:
+        return sum(1 for i in self.items if i[0] == "WARN")
+
+    def dump(self, quiet: bool) -> None:
+        if quiet and not self.items:
+            return
+        for level, rule, loc, msg in self.items:
+            print(f"{level:<5} {rule:<6} {loc:<28} {msg}")
+        if self.items:
+            print(f"------ {len(self.items)} 项（{self.errors} error / {self.warns} warn）")
+        elif not quiet:
+            print("✓ 全部通过")
+
+
+# ---------------------------------------------------------------- 读取
+
+
+def load_all(root: Path, report: Report) -> dict[str, list[dict]]:
+    out: dict[str, list[dict]] = {}
+    for name in pool.DATA_FILES:
+        path = root / "data" / f"{name}.jsonl"
+        try:
+            out[name] = pool.read_jsonl(path)
+        except ValueError as exc:
+            report.error("read", path.name, str(exc))
+            out[name] = []
+    return out
+
+
+# ---------------------------------------------------------------- 公钥登记表
+
+
+def build_keyring(records: list[dict], report: Report) -> dict[str, str]:
+    """pubkey -> status。同一公钥出现多次时取最后一条。"""
+    latest: dict[str, str] = {}
+    for idx, rec in enumerate(records, 1):
+        pk = rec.get("pubkey")
+        st = rec.get("status", "active")
+        if not isinstance(pk, str):
+            report.error("p-002", f"keyring.jsonl:{idx}", "缺少 pubkey 字段")
+            continue
+        latest[pk] = st
+    return latest
+
+
+# ---------------------------------------------------------------- p-001
+
+
+def check_chain(name: str, records: list[dict], report: Report) -> None:
+    prev_hash = None
+    for idx, rec in enumerate(records, 1):
+        loc = f"{name}.jsonl:{idx}"
+        seq = rec.get("seq")
+        if seq != idx:
+            report.error("p-001", loc, f"seq 应为 {idx}，实际 {seq!r}（不能跳号）")
+        stored_prev = rec.get("prev")
+        if stored_prev != prev_hash:
+            report.error(
+                "p-001",
+                loc,
+                f"prev 对不上：期望 {(prev_hash or 'null')[:22]}…，"
+                f"实际 {str(stored_prev)[:22]}…",
+            )
+        if not pool.verify_hash(rec):
+            report.error("p-001", loc, "hash 与内容不符（记录被改过）")
+        prev_hash = rec.get("hash")
+
+
+# ---------------------------------------------------------------- p-002
+
+
+def check_signatures(
+    name: str, records: list[dict], keyring: dict[str, str], report: Report
+) -> None:
+    self_signed = name == "keyring"
+    for idx, rec in enumerate(records, 1):
+        loc = f"{name}.jsonl:{idx}"
+        h = rec.get("hash")
+        sig = rec.get("sig")
+        by = rec.get("by")
+
+        if self_signed:
+            # keyring 是信任锚：用记录自带的公钥验自己的签名
+            pk = rec.get("pubkey")
+            if not isinstance(pk, str):
+                continue
+            if by != pk:
+                report.error("p-002", loc, "keyring 记录的 by 必须等于它自己的 pubkey")
+                continue
+        else:
+            if not isinstance(by, str):
+                report.error("p-002", loc, "缺少 by（公钥）字段")
+                continue
+            status = keyring.get(by)
+            if status is None:
+                report.error("p-002", loc, f"签名公钥未登记：{by[:30]}…")
+                continue
+            if status != "active":
+                report.warn("p-002", loc, f"签名者状态为 {status}")
+            pk = by
+
+        if not isinstance(h, str) or not pool.verify_sig(pk, h, sig):
+            report.error("p-002", loc, "签名无效")
+
+
+# ---------------------------------------------------------------- p-003
+
+
+def check_reviewer(
+    deliverables: list[dict], keyring: dict[str, str], report: Report
+) -> None:
+    for idx, rec in enumerate(deliverables, 1):
+        # create 记录：签名者必须就是 deliverer
+        # ★ 踩坑后加的：曾用错密钥交付，但记录内部自洽（by == deliverer），
+        #   旧校验器毫无反应。这条防的是"签名者与声明的交付者不一致"。
+        if rec.get("op") == "create":
+            if rec.get("by") != rec.get("deliverer"):
+                report.error(
+                    "p-003",
+                    f"deliverables.jsonl:{idx}",
+                    "交付记录的签名者与 deliverer 不是同一把公钥",
+                )
+            continue
+        if rec.get("op") != "review":
+            continue
+        loc = f"deliverables.jsonl:{idx}"
+        review = rec.get("review") or {}
+        reviewer = review.get("by")
+        deliverer = rec.get("deliverer")
+        if not isinstance(reviewer, str) or not isinstance(deliverer, str):
+            report.error("p-003", loc, "review 记录缺少 review.by 或 deliverer")
+            continue
+        if reviewer == deliverer:
+            report.error("p-003", loc, "复核者与交付者是同一把公钥（自己批自己）")
+        result = review.get("result")
+        if result not in ("pass", "fail"):
+            report.error("p-003", loc, f"review.result 必须是 pass/fail，实际 {result!r}")
+
+
+# ---------------------------------------------------------------- 交叉检查
+
+
+def check_declared_status(
+    requests: list[dict], report: Report
+) -> None:
+    derived = pool.request_status(requests)
+    latest = pool.latest_per_id(requests)
+    for rid, declared in latest.items():
+        real = derived.get(rid)
+        if declared.get("status_declared") and declared["status_declared"] != real:
+            report.warn(
+                "p-007",
+                f"requests.jsonl:{rid}",
+                f"status_declared={declared['status_declared']} 与推导状态 {real} 不符"
+                "（以推导为准）",
+            )
+
+
+# ---------------------------------------------------------------- main
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="池子校验器")
+    ap.add_argument("--root", default=str(ROOT), help="仓库根目录")
+    ap.add_argument("--quiet", action="store_true", help="只在有问题时输出")
+    args = ap.parse_args()
+
+    root = Path(args.root).resolve()
+    if not (root / "data").is_dir():
+        print(f"错误：{root}/data 不存在", file=sys.stderr)
+        return 2
+
+    report = Report()
+    data = load_all(root, report)
+    keyring = build_keyring(data["keyring"], report)
+
+    for name, records in data.items():
+        check_chain(name, records, report)
+
+    for name, records in data.items():
+        check_signatures(name, records, keyring, report)
+
+    check_reviewer(data["deliverables"], keyring, report)
+    check_declared_status(data["requests"], report)
+
+    report.dump(args.quiet)
+    return 1 if report.errors else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
