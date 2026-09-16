@@ -178,6 +178,25 @@ git add -A && git commit -m "merge: 解决冲突"
 
 ---
 
+## 关于 GitHub 镜像（只和"维护节点"有关）
+
+仓库有一份公开只读镜像在 **https://github.com/weathour/pool**。
+
+**方向是单向的：Gitea → GitHub。** 权威永远在 Gitea，
+**GitHub 上的 PR 不会被处理** —— 要参与请到主仓库开 issue / PR。
+
+**普通参与者不需要做任何事。** 但如果你这台机器负责镜像（也就是配了
+`github` 远端），需要装一次钩子，否则镜像不会跟：
+
+```bash
+git config core.hooksPath .githooks
+```
+
+之后每次 `git push origin main` 都会自动把同一个提交也推到 GitHub
+（`.githooks/pre-push` 负责）。忘了配的话，`tools/verify-meta` 会提醒你。
+
+---
+
 ## 怎么验证这个池子
 
 **三步，不需要读任何源码：**

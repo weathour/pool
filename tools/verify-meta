@@ -210,13 +210,21 @@ def check_git_hooks(f: Findings) -> None:
     except (subprocess.CalledProcessError, FileNotFoundError):
         hp = ""
     if not hp:
-        # 只在钩子文件确实存在、但没挂上时报警。
-        # 普通 clone 没有钩子目录，那是正常的 —— 一开始无条件报警，
-        # 结果每个外部 clone 跑 verify-meta 都会看到一个无意义的警告。
-        if (ROOT / ".githooks" / "pre-push").exists():
+        # ★ 只有在"这台机器负责镜像"时才报警 —— 判据是配了 github 远端。
+        #   普通参与者的 clone 没有 github 远端，也没有钩子配置，
+        #   那完全正常。第一版无条件报警，结果每个外部 clone 都会看到
+        #   一个无意义的警告（而"总是报警"的检查很快就会被无视）。
+        try:
+            remotes = subprocess.check_output(
+                ["git", "remote"], cwd=ROOT, text=True
+            ).split()
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            remotes = []
+        if "github" in remotes and (ROOT / ".githooks" / "pre-push").exists():
             f.warn(
                 "git",
-                "有 .githooks/pre-push 但没设 core.hooksPath —— 镜像钩子不会生效",
+                "这台机器有 github 远端（负责镜像）但没设 core.hooksPath "
+                "—— 镜像钩子不会生效",
             )
         return
     d = ROOT / hp
